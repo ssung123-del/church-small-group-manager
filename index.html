@@ -1858,41 +1858,74 @@
                 const names = targets.map(m => m.name).join(', ');
                 const displayName = targets.length > 3 ? `${targets[0].name} 외 ${targets.length - 1}명` : names;
 
-                if (!confirm(`${displayName}을(를) 정말 그룹에서 제외하시겠습니까? (미배정 상태로 변경됨)`)) return;
+                // Determine if we are unassigning or permanently deleting
+                // Check if ALL selected targets are already unassigned (leader_id is empty)
+                const isPermanentDelete = targets.every(m => !m.leader_id);
 
-                // Optimistic Update
-                const backup = { ...globalData };
+                if (isPermanentDelete) {
+                    if (!confirm(`⚠️ 경고: 정말 ${displayName}을(를) 영구 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다!`)) return;
 
-                const targetIds = targets.map(m => String(m.id));
-                // Unassign (remove leader_id)
-                const newMembers = members.map(m => targetIds.includes(String(m.id)) ? { ...m, leader_id: '' } : m);
+                    // Optimistic Update for Permanent Delete
+                    const backup = { ...globalData };
+                    const targetIds = targets.map(m => String(m.id));
 
-                // Recalculate leader count
-                const leaderCounts = {};
-                newMembers.forEach(m => {
-                    if (m.leader_id) leaderCounts[m.leader_id] = (leaderCounts[m.leader_id] || 0) + 1;
-                });
+                    const newMembers = members.filter(m => !targetIds.includes(String(m.id)));
 
-                const newLeaders = leaders.map(l => ({
-                    ...l,
-                    current_members: leaderCounts[l.id] || 0
-                }));
+                    // No need to update leaders count as they are unassigned
+                    setGlobalData({ ...globalData, members: newMembers });
+                    setSyncing?.(true);
 
-                setGlobalData({ ...globalData, members: newMembers, leaders: newLeaders });
-                setSyncing?.(true);
+                    // Clear selection
+                    setSelectedMembers([]);
+                    setRecommendedLeaders([]);
+                    if (contextMenu.visible) setContextMenu({ ...contextMenu, visible: false });
 
-                // Clear selection
-                setSelectedMembers([]);
-                setRecommendedLeaders([]);
-                if (contextMenu.visible) setContextMenu({ ...contextMenu, visible: false });
+                    try {
+                        await Promise.all(targets.map(m => removeMember(m.id, '', 'DELETE')));
+                    } catch (err) {
+                        alert("삭제 실패: " + err.message);
+                        setGlobalData(backup);
+                    } finally {
+                        setSyncing?.(false);
+                    }
+                } else {
+                    // Normal Unassign
+                    if (!confirm(`${displayName}을(를) 정말 그룹에서 제외하시겠습니까? (미배정 상태로 변경됨)`)) return;
 
-                try {
-                    await Promise.all(targets.map(m => updateMember(m.id, { leader_id: '' })));
-                } catch (err) {
-                    alert("삭제 실패: " + err.message);
-                    setGlobalData(backup);
-                } finally {
-                    setSyncing?.(false);
+                    // Optimistic Update
+                    const backup = { ...globalData };
+
+                    const targetIds = targets.map(m => String(m.id));
+                    // Unassign (remove leader_id)
+                    const newMembers = members.map(m => targetIds.includes(String(m.id)) ? { ...m, leader_id: '' } : m);
+
+                    // Recalculate leader count
+                    const leaderCounts = {};
+                    newMembers.forEach(m => {
+                        if (m.leader_id) leaderCounts[m.leader_id] = (leaderCounts[m.leader_id] || 0) + 1;
+                    });
+
+                    const newLeaders = leaders.map(l => ({
+                        ...l,
+                        current_members: leaderCounts[l.id] || 0
+                    }));
+
+                    setGlobalData({ ...globalData, members: newMembers, leaders: newLeaders });
+                    setSyncing?.(true);
+
+                    // Clear selection
+                    setSelectedMembers([]);
+                    setRecommendedLeaders([]);
+                    if (contextMenu.visible) setContextMenu({ ...contextMenu, visible: false });
+
+                    try {
+                        await Promise.all(targets.map(m => updateMember(m.id, { leader_id: '' })));
+                    } catch (err) {
+                        alert("삭제 실패: " + err.message);
+                        setGlobalData(backup);
+                    } finally {
+                        setSyncing?.(false);
+                    }
                 }
             };
 
@@ -2091,11 +2124,13 @@
                                         ✏️ 수정
                                     </button>
                                 )}
-                                <button onClick={() => handleDeleteClick()} className="bg-white/20 hover:bg-red-500/80 px-3 py-1 rounded-lg text-sm font-bold transition-colors flex items-center gap-1 whitespace-nowrap">
-                                    🗑️ 제외
+                                <button onClick={() => handleDeleteClick()} className={`bg-white/20 px-3 py-1 rounded-lg text-sm font-bold transition-colors flex items-center gap-1 whitespace-nowrap ${selectedMembers.every(s => !s.member.leader_id) ? 'hover:bg-red-600/80 text-red-100 bg-red-600/50' : 'hover:bg-red-500/80'}`}>
+                                    {selectedMembers.every(s => !s.member.leader_id) ? '🗑️ 영구 삭제' : '🗑️ 제외'}
                                 </button>
 
-                                <span className="text-blue-100 text-xs hidden sm:inline ml-2 whitespace-nowrap"> - 이동할 그룹 터치</span>
+                                <span className="text-blue-100 text-xs hidden sm:inline ml-2 whitespace-nowrap">
+                                    {selectedMembers.every(s => !s.member.leader_id) ? ' - 주의: 복구 불가' : ' - 이동할 그룹 터치'}
+                                </span>
                             </div>
                             <button
                                 onClick={() => { setSelectedMembers([]); setRecommendedLeaders([]); }}
