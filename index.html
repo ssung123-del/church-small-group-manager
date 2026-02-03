@@ -1,0 +1,2453 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>소그룹 편성 매니저</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { theme: { extend: { colors: { brand: { 50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8' } } } } }</script>
+    <style>
+        @keyframes fade-in {
+            from {
+                opacity: 0
+            }
+
+            to {
+                opacity: 1
+            }
+        }
+
+        @keyframes fade-in-up {
+            from {
+                opacity: 0;
+                transform: translateY(10px)
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0)
+            }
+        }
+
+        .animate-fade-in {
+            animation: fade-in .3s ease-out
+        }
+
+        .animate-fade-in-up {
+            animation: fade-in-up .4s ease-out
+        }
+
+        @media print {
+            body * {
+                visibility: hidden
+            }
+
+            #print-area,
+            #print-area * {
+                visibility: visible
+            }
+
+            #print-area {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 100%;
+                background: #fff
+            }
+
+            .no-print {
+                display: none !important
+            }
+        }
+
+        .print-container {
+            font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, sans-serif;
+            max-width: 210mm;
+            margin: 0 auto;
+            padding: 15mm;
+            background: #fff
+        }
+
+        .print-header {
+            border-bottom: 2px solid #1e40af;
+            padding-bottom: 12px;
+            margin-bottom: 20px
+        }
+
+        .print-title {
+            font-size: 24px;
+            font-weight: bold;
+            color: #1e40af
+        }
+
+        .print-subtitle {
+            font-size: 14px;
+            color: #64748b;
+            margin-top: 4px
+        }
+
+        .print-table {
+            width: 100%;
+            border-collapse: collapse
+        }
+
+        .print-table th {
+            background: #f1f5f9;
+            padding: 10px 8px;
+            text-align: left;
+            font-size: 12px;
+            font-weight: bold;
+            border-bottom: 2px solid #e2e8f0
+        }
+
+        .print-table td {
+            padding: 10px 8px;
+            border-bottom: 1px solid #e2e8f0;
+            font-size: 13px
+        }
+
+        .print-table tr:nth-child(even) {
+            background: #f8fafc
+        }
+
+        .print-footer {
+            margin-top: 30px;
+            text-align: center;
+            font-size: 11px;
+            color: #94a3b8
+        }
+    </style>
+</head>
+
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+        const GOOGLE_MAPS_API_KEY = 'AIzaSyAnGr22LerGTOWJ7FMsGoG8cVUtHwcbICw', SHEET_API_URL_KEY = 'CHURCH_GROUP_SHEET_URL', GEOCODE_DELAY_MS = 250;
+
+        // 미니멀 그레이스케일 맵 스타일
+        const MAP_STYLES = [
+            { elementType: "geometry", stylers: [{ color: "#f8fafc" }] },
+            { elementType: "labels.icon", stylers: [{ visibility: "off" }] },
+            { elementType: "labels.text.fill", stylers: [{ color: "#64748b" }] },
+            { elementType: "labels.text.stroke", stylers: [{ color: "#f8fafc" }] },
+            { featureType: "poi", stylers: [{ visibility: "off" }] },
+            { featureType: "road", elementType: "geometry", stylers: [{ color: "#ffffff" }] },
+            { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#e2e8f0" }] },
+            { featureType: "transit", stylers: [{ visibility: "off" }] },
+            { featureType: "water", elementType: "geometry", stylers: [{ color: "#e2e8f0" }] }
+        ];
+
+        const sleep = ms => new Promise(r => setTimeout(r, ms)), getApiUrl = () => localStorage.getItem(SHEET_API_URL_KEY);
+        const request = async (action, payload = {}) => { const url = getApiUrl(); if (!url) throw new Error("DB 미연결"); const r = await fetch(url, { method: 'POST', body: JSON.stringify({ action, ...payload }) }); const res = await r.json(); if (res.status === 'error') throw new Error(res.message); return res.data };
+        const fetchLeaders = async () => await request('GET_LEADERS'), insertLeader = async l => await request('ADD_LEADER', { leader: l }), deleteLeader = async id => await request('DELETE_LEADER', { id }), updateLeader = async (id, updates) => await request('UPDATE_LEADER', { id, updates }), insertMember = async m => await request('ADD_MEMBER', { member: m }), updateMember = async (id, updates) => await request('UPDATE_MEMBER', { id, updates }), fetchMembersByLeader = async id => await request('GET_MEMBERS_BY_LEADER', { leaderId: id }), fetchFullData = async () => ({ leaders: await request('GET_LEADERS'), members: await request('GET_ALL_MEMBERS') }), removeMember = async (mid, lid, mode) => await request('REMOVE_MEMBER', { memberId: mid, leaderId: lid, mode }), checkConnection = async url => { try { return (await (await fetch(url, { method: 'POST', body: JSON.stringify({ action: 'PING' }) })).json()).status === 'success' } catch { return false } };
+        const geocodeAddress = async addr => { if (!window.google?.maps) throw new Error("Maps not loaded"); return new Promise((res, rej) => { new window.google.maps.Geocoder().geocode({ address: addr }, (r, s) => { if (s === 'OK' && r[0]) res({ lat: r[0].geometry.location.lat(), lng: r[0].geometry.location.lng(), formattedAddress: r[0].formatted_address }); else rej(new Error(`Geocode: ${s}`)) }) }) };
+        const calcDist = (a, b, c, d) => { const R = 6371, dLat = (c - a) * Math.PI / 180, dLng = (d - b) * Math.PI / 180, x = Math.sin(dLat / 2) ** 2 + Math.cos(a * Math.PI / 180) * Math.cos(c * Math.PI / 180) * Math.sin(dLng / 2) ** 2; return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x)) };
+        // 생년월일에서 나이 계산 (다양한 형식 지원)
+        const calcAge = (birthdate) => {
+            if (!birthdate) return 0;
+            let bd;
+            // 숫자 시리얼 형식 (Google Sheets 날짜)
+            if (typeof birthdate === 'number') {
+                // Excel/Sheets 날짜 시리얼: 1900-01-01을 1로 시작
+                bd = new Date((birthdate - 25569) * 86400 * 1000);
+            } else if (birthdate instanceof Date) {
+                bd = birthdate;
+            } else {
+                const str = String(birthdate).trim();
+                // ISO 타임스탬프에서 날짜 부분만 추출
+                if (str.includes('T')) {
+                    bd = new Date(str.split('T')[0]);
+                } else if (str.includes('.') || str.includes('/') || str.includes('-')) {
+                    // YYYY.MM.DD, YYYY/MM/DD, YYYY-MM-DD 형식 수동 파싱
+                    const parts = str.split(/[.\/-]/);
+                    if (parts.length >= 3) {
+                        const year = parseInt(parts[0]);
+                        const month = parseInt(parts[1]) - 1; // 월은 0부터 시작
+                        const day = parseInt(parts[2]);
+                        if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+                            bd = new Date(year, month, day);
+                        }
+                    }
+                } else {
+                    bd = new Date(str);
+                }
+            }
+            if (isNaN(bd) || bd.getFullYear() < 1900) return 0;
+
+            const today = new Date();
+            let age = today.getFullYear() - bd.getFullYear();
+            const m = today.getMonth() - bd.getMonth();
+            if (m < 0 || (m === 0 && today.getDate() < bd.getDate())) age--;
+            return age;
+        };
+
+        // 추천 로직 (멤버 -> 리더 추천)
+        const getDistance = (lat1, lon1, lat2, lon2) => {
+            const R = 6371; // Radius of Earth in kilometers
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a =
+                Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        };
+
+        const findClosest = (lat, lng, birthdate, leaders, topN = 3) => {
+            if (!lat || !lng) return [];
+            const candidates = leaders.filter(l => l.id && l.lat && l.lng).map(l => {
+                const dist = getDistance(lat, lng, l.lat, l.lng);
+                const ageDiff = Math.abs(calcAge(birthdate || '2000-01-01') - calcAge(l.birthdate || '1980-01-01'));
+                // 거리 우선 + 나이 차이 보정 (10km 이내면 나이 차이 점수 반영 등 - 현재는 단순 거리순)
+                // 거리 점수(km) + 나이차이/10 (10살 차이 = 1km 패널티)
+                const score = dist + (ageDiff / 10);
+                return { ...l, distance: dist, ageDiff, score };
+            });
+            return candidates.sort((a, b) => a.score - b.score).slice(0, topN);
+        };
+
+        // 추천 로직 (리더 -> 멤버 모집)
+        const findRecruits = (leader, members, topN = 5) => {
+            if (!leader || !leader.lat || !leader.lng) return { unassigned: [], assigned: [] };
+
+            // 모든 멤버 스코어링 (배정된 멤버는 자기 식구 제외)
+            const candidates = members.filter(m => String(m.leader_id) !== String(leader.id) && m.lat && m.lng).map(m => {
+                const dist = getDistance(leader.lat, leader.lng, m.lat, m.lng);
+                const ageDiff = Math.abs(calcAge(leader.birthdate || '1980-01-01') - calcAge(m.birthdate || '2000-01-01'));
+                // 점수: 거리(km) + (나이차이/10) -- 가까운 순인데 나이 비슷하면 가산점
+                const score = dist + (ageDiff / 20); // 여기선 나이 비중 더 낮춤 (거리가 더 중요)
+                return { ...m, distance: dist, ageDiff, score };
+            });
+
+            // 미배정 / 배정 분리 정렬
+            const unassigned = candidates.filter(m => !m.leader_id).sort((a, b) => a.score - b.score).slice(0, topN);
+            const assigned = candidates.filter(m => m.leader_id).sort((a, b) => a.score - b.score).slice(0, topN);
+
+            return { unassigned, assigned };
+        };
+        // 생년월일 포맷팅 (다양한 형식에서 YYYY-MM-DD 추출)
+        const formatBirthdate = (birthdate) => {
+            if (!birthdate) return '-';
+            let year, month, day;
+            if (typeof birthdate === 'number') {
+                // 숫자 시리얼 형식 변환
+                const date = new Date((birthdate - 25569) * 86400 * 1000);
+                year = date.getFullYear();
+                month = date.getMonth() + 1;
+                day = date.getDate();
+            } else {
+                const str = String(birthdate).trim();
+                if (str.includes('T')) return str.split('T')[0];
+                // YYYY.MM.DD, YYYY/MM/DD, YYYY-MM-DD 형식 수동 파싱
+                const parts = str.split(/[.\/-]/);
+                if (parts.length >= 3) {
+                    year = parseInt(parts[0]);
+                    month = parseInt(parts[1]);
+                    day = parseInt(parts[2]);
+                }
+            }
+            if (year && month && day) {
+                return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+            }
+            return String(birthdate).slice(0, 10);
+        };
+        // 성별 아이콘 (다양한 형식 지원: Female, 여, 여성, F, 女)
+        const genderIcon = (g) => { const s = String(g || '').toLowerCase(); return ['female', '여', '여성', 'f', '女'].some(v => s.includes(v)) ? '👩' : '👨'; };
+        // 직분 간소화 (권사 포함→권사, 안수집사 포함→안수집사, 서리집사는 유지)
+        const formatRole = (r) => { if (!r) return ''; const s = String(r); if (s.includes('서리집사')) return s; if (s.includes('안수집사')) return '안수집사'; if (s.includes('권사')) return '권사'; return s; };
+        // 연락처 자동 포맷팅 (010-0000-0000 형태)
+        const formatPhone = (value) => { const nums = value.replace(/[^0-9]/g, '').slice(0, 11); if (nums.length <= 3) return nums; if (nums.length <= 7) return `${nums.slice(0, 3)}-${nums.slice(3)}`; return `${nums.slice(0, 3)}-${nums.slice(3, 7)}-${nums.slice(7)}`; };
+
+        const GAS_CODE = `function doPost(e){const lock=LockService.getScriptLock();lock.tryLock(30000);try{const ss=SpreadsheetApp.getActiveSpreadsheet(),req=JSON.parse(e.postData.contents),act=req.action;let data=null;init(ss);if(act==='PING')data='PONG';else if(act==='GET_LEADERS'){refresh(ss);data=getRows("Leaders")}else if(act==='ADD_LEADER')data=addLeader(ss,req.leader);else if(act==='DELETE_LEADER')data=delLeader(ss,req.id);else if(act==='UPDATE_LEADER')data=updateLeader(ss,req.id,req.updates);else if(act==='ADD_MEMBER')data=addMember(ss,req.member);else if(act==='UPDATE_MEMBER')data=updateMember(ss,req.id,req.updates);else if(act==='GET_MEMBERS_BY_LEADER')data=getRows("Members").filter(function(m){return String(m.leader_id)===String(req.leaderId)});else if(act==='GET_ALL_MEMBERS')data=getRows("Members");else if(act==='REMOVE_MEMBER')data=remMember(ss,req.memberId,req.leaderId,req.mode);return ContentService.createTextOutput(JSON.stringify({status:'success',data})).setMimeType(ContentService.MimeType.JSON)}catch(err){return ContentService.createTextOutput(JSON.stringify({status:'error',message:err.toString()})).setMimeType(ContentService.MimeType.JSON)}finally{lock.releaseLock()}}function init(ss){var check=function(n,h){var s=ss.getSheetByName(n);if(!s){ss.insertSheet(n).appendRow(h);return}var ch=s.getRange(1,1,1,s.getLastColumn()).getValues()[0];h.forEach(function(k){if(ch.indexOf(k)===-1){s.insertColumnAfter(s.getLastColumn());s.getRange(1,s.getLastColumn()+1).setValue(k)}})};check("Leaders",["id","name","role","gender","birthdate","contact","address","lat","lng","max_capacity","current_members"]);check("Members",["id","leader_id","name","role","gender","birthdate","contact","address","lat","lng","status"])}function getRows(n){var s=SpreadsheetApp.getActiveSpreadsheet().getSheetByName(n),d=s.getDataRange().getValues(),h=d.shift();return d.map(function(r){var o={};h.forEach(function(k,i){o[k]=r[i]});return o})}function addLeader(ss,l){ss.getSheetByName("Leaders").appendRow([Date.now(),l.name,l.role,l.gender,l.birthdate,l.contact,l.address,l.lat,l.lng,l.max_capacity,0]);return"OK"}function delLeader(ss,id){var m=ss.getSheetByName("Members"),md=m.getDataRange().getValues();for(var i=1;i<md.length;i++)if(String(md[i][1])===String(id))m.getRange(i+1,2).setValue("");var s=ss.getSheetByName("Leaders"),d=s.getDataRange().getValues();for(var i=1;i<d.length;i++)if(String(d[i][0])===String(id)){s.deleteRow(i+1);break}return"OK"}function updateLeader(ss,id,u){var s=ss.getSheetByName("Leaders"),d=s.getDataRange().getValues(),h=d[0];for(var i=1;i<d.length;i++)if(String(d[i][0])===String(id)){for(var k in u){var ci=h.indexOf(k);if(ci>=0)s.getRange(i+1,ci+1).setValue(u[k])}break}return"OK"}function updateMember(ss,id,u){var s=ss.getSheetByName("Members"),d=s.getDataRange().getValues(),h=d[0];for(var i=1;i<d.length;i++)if(String(d[i][0])===String(id)){var oldLid=d[i][1];for(var k in u){var ci=h.indexOf(k);if(ci>=0)s.getRange(i+1,ci+1).setValue(u[k])}if(u.leader_id!==undefined&&u.leader_id!==oldLid){if(oldLid)recalc(ss,oldLid);if(u.leader_id)recalc(ss,u.leader_id)}break}return"OK"}function addMember(ss,m){var ms=ss.getSheetByName("Members"),h=ms.getRange(1,1,1,ms.getLastColumn()).getValues()[0];var row=[];h.forEach(function(col){if(col==="id")row.push(Date.now());else if(col==="leader_id")row.push(m.leader_id||"");else if(col==="status")row.push(m.status||"wants_group");else row.push(m[col]||"")});ms.appendRow(row);if(m.leader_id)recalc(ss,m.leader_id);return"OK"}function remMember(ss,mid,lid,mode){var s=ss.getSheetByName("Members"),d=s.getDataRange().getValues();for(var i=1;i<d.length;i++)if(String(d[i][0])===String(mid)){mode==='DELETE'?s.deleteRow(i+1):s.getRange(i+1,2).setValue("");break}if(lid)recalc(ss,lid);return"OK"}function recalc(ss,lid){if(!lid)return;var m=ss.getSheetByName("Members").getDataRange().getValues();var c=0;for(var i=1;i<m.length;i++)if(String(m[i][1])===String(lid))c++;var l=ss.getSheetByName("Leaders"),ld=l.getDataRange().getValues();for(var i=1;i<ld.length;i++)if(String(ld[i][0])===String(lid)){l.getRange(i+1,11).setValue(c);break}}function refresh(ss){var m=ss.getSheetByName("Members").getDataRange().getValues(),cnt={};for(var i=1;i<m.length;i++)if(m[i][1])cnt[m[i][1]]=(cnt[m[i][1]]||0)+1;var l=ss.getSheetByName("Leaders"),ld=l.getDataRange().getValues();for(var i=1;i<ld.length;i++){var c=cnt[ld[i][0]]||0;if(ld[i][10]!=c)l.getRange(i+1,11).setValue(c)}}function autoGeocodeAddress(e){var s=e.source.getActiveSheet(),r=e.range,n=s.getName();if(n!=='Leaders'&&n!=='Members')return;var h=s.getRange(1,1,1,s.getLastColumn()).getValues()[0],ac=h.indexOf('address')+1,lc=h.indexOf('lat')+1,gc=h.indexOf('lng')+1;if(r.getColumn()!==ac||r.getRow()===1)return;var a=r.getValue();if(!a)return;try{var g=Maps.newGeocoder().geocode(a);if(g.results&&g.results.length>0){var l=g.results[0].geometry.location;s.getRange(r.getRow(),lc).setValue(l.lat);s.getRange(r.getRow(),gc).setValue(l.lng)}}catch(err){}}`;
+
+
+        const SetupScreen = ({ onComplete }) => {
+            const [url, setUrl] = useState('');
+            const [loading, setLoading] = useState(false);
+            const [step, setStep] = useState(1);
+            const connect = async () => { if (!url.includes('script.google.com')) { alert("잘못된 URL"); return } setLoading(true); if (await checkConnection(url)) { localStorage.setItem(SHEET_API_URL_KEY, url); onComplete() } else alert("연결 실패"); setLoading(false) };
+            return (<div className="min-h-screen bg-slate-50 flex items-center justify-center p-4"><div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden"><div className="bg-brand-600 p-6 text-white text-center"><h1 className="text-2xl font-bold">데이터베이스 연결</h1></div><div className="p-8 space-y-6"><div className="bg-blue-50 p-4 rounded-lg text-sm border border-blue-100"><b>1.</b> <a href="https://sheets.new" target="_blank" className="text-brand-600 underline">새 스프레드시트</a> → 확장 프로그램 → Apps Script<br /><b>2.</b> 아래 코드를 <b>[복사]</b>해서 기존 내용을 지우고 전체를 붙여넣으세요.<br /><b>3.</b> [저장(💾)] 후 [배포] → [새 배포] → 웹 앱 (액세스: <b>모든 사용자</b>)</div><div className="relative"><pre className="bg-slate-900 text-slate-300 p-3 rounded-lg text-xs h-20 overflow-auto font-mono">{GAS_CODE.slice(0, 200)}...</pre><button onClick={() => { navigator.clipboard.writeText(GAS_CODE); alert("복사됨"); setStep(2) }} className="absolute top-2 right-2 bg-white px-2 py-1 rounded text-xs font-bold">복사</button></div><div className="flex gap-2"><input value={url} onChange={e => setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/..." className="flex-1 border rounded-lg px-3 py-2" /><button onClick={connect} disabled={!url} className="bg-brand-600 text-white px-6 py-2 rounded-lg font-bold disabled:opacity-50">연결</button></div><div className="bg-green-50 p-4 rounded-lg text-sm border border-green-200"><div className="font-bold text-green-700 mb-2">💡 자동 좌표 설정법 (필수)</div><ol className="text-xs text-green-700 space-y-2 list-decimal list-inside bg-white/50 p-2 rounded border border-green-100"><li>위 코드를 Apps Script에 모두 붙여넣고 <b>저장(💾)</b>했는지 확인하세요.</li><li>왼쪽 메뉴에서 <b>⏰ 트리거 (시계 아이콘)</b> 클릭 → <b>[+ 트리거 추가]</b></li><li>다음과 같이 설정하고 [저장] 하세요:<ul className="pl-4 mt-1 space-y-1 list-disc text-slate-600"><li>실행할 함수: <b>autoGeocodeAddress</b> (이제 목록에 보일 겁니다)</li><li>이벤트 소스: <b>스프레드시트</b></li><li>이벤트 유형: <b>수정 시 (On edit)</b></li></ul></li><li>(최초 1회) 권한 팝업에서 <b>[고급] → [이동] → [허용]</b> 선택</li></ol></div></div></div></div>)
+        };
+
+        const Modal = ({ leader, onClose, onUpdate }) => {
+            const [members, setMembers] = useState([]), [loading, setLoading] = useState(true);
+            useEffect(() => { if (leader.id) { setLoading(true); fetchMembersByLeader(leader.id).then(setMembers).finally(() => setLoading(false)) } }, [leader]);
+            const remove = async (id, mode) => { if (!confirm(mode === 'DELETE' ? "삭제?" : "제외?")) return; await removeMember(id, leader.id, mode); setMembers(await fetchMembersByLeader(leader.id)); onUpdate() };
+            return (<div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"><div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-hidden flex flex-col"><div className="px-6 py-4 border-b flex justify-between bg-slate-50"><div><b className="text-lg">{leader.name}</b> 소그룹원 ({members.length}명)</div><button onClick={onClose}>✕</button></div><div className="flex-1 overflow-auto p-4">{loading ? <div className="text-center py-8">로딩...</div> : members.length === 0 ? <div className="text-center text-slate-400 py-8">없음</div> : members.map(m => <div key={m.id} className="flex justify-between p-3 bg-slate-50 rounded-lg mb-2"><div><b>{m.name}</b> <span className="text-xs text-slate-500">{m.role} · {calcAge(m.birthdate)}세</span></div><div className="text-xs space-x-2"><button onClick={() => remove(m.id, 'UNASSIGN')} className="text-amber-600">제외</button><button onClick={() => remove(m.id, 'DELETE')} className="text-red-600">삭제</button></div></div>)}</div><div className="p-4 border-t text-right"><button onClick={onClose} className="px-4 py-2 border rounded-lg">닫기</button></div></div></div>)
+        };
+
+        // 정보 수정 모달
+        const EditModal = ({ item, type, leaders, onClose, onUpdate }) => {
+            const [form, setForm] = useState({ ...item });
+            const [saving, setSaving] = useState(false);
+            const [addressChanged, setAddressChanged] = useState(false);
+
+            const handleChange = (key, value) => {
+                setForm(prev => ({ ...prev, [key]: value }));
+                if (key === 'address') setAddressChanged(true);
+            };
+
+            const save = async () => {
+                setSaving(true);
+                try {
+                    let updates = {};
+                    const fields = type === 'leader'
+                        ? ['name', 'role', 'gender', 'birthdate', 'contact', 'address', 'max_capacity']
+                        : ['name', 'role', 'gender', 'birthdate', 'contact', 'address', 'leader_id'];
+
+                    for (const f of fields) {
+                        if (String(form[f] ?? '') !== String(item[f] ?? '')) {
+                            updates[f] = form[f];
+                        }
+                    }
+
+                    // 주소가 변경되었으면 좌표 업데이트
+                    if (addressChanged && updates.address) {
+                        console.log('[EditModal] 주소 변경 감지, geocode 호출:', updates.address);
+                        try {
+                            const geo = await geocodeAddress(updates.address);
+                            console.log('[EditModal] geocode 성공:', geo);
+                            updates.address = geo.formattedAddress;
+                            updates.lat = geo.lat;
+                            updates.lng = geo.lng;
+                        } catch (geoErr) {
+                            console.error('[EditModal] geocode 실패:', geoErr);
+                            alert(`주소 변환 실패: ${geoErr.message}\n입력한 주소를 확인해주세요.`);
+                            setSaving(false);
+                            return;
+                        }
+                    }
+
+                    if (Object.keys(updates).length === 0) {
+                        alert("변경사항 없음");
+                        setSaving(false);
+                        return;
+                    }
+
+                    console.log('[EditModal] 서버로 전송할 updates:', updates);
+
+                    if (type === 'leader') {
+                        await updateLeader(item.id, updates);
+                    } else {
+                        await updateMember(item.id, updates);
+                    }
+
+                    alert("수정 완료");
+                    onUpdate();
+                    onClose();
+                } catch (e) {
+                    console.error('[EditModal] 저장 실패:', e);
+                    alert(`저장 실패: ${e.message}`);
+                } finally {
+                    setSaving(false);
+                }
+            };
+
+            const ic = "block w-full rounded-md border shadow-sm py-2 px-3 text-sm";
+
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+                        <div className="px-6 py-4 border-b flex justify-between bg-slate-50">
+                            <b className="text-lg">✏️ {type === 'leader' ? '리더' : '순원'} 정보 수정</b>
+                            <button onClick={onClose} className="text-slate-400 hover:text-slate-600">✕</button>
+                        </div>
+                        <div className="p-6 space-y-4">
+                            <div>
+                                <label className="text-xs font-bold text-slate-500 block mb-1">이름</label>
+                                <input value={form.name || ''} onChange={e => handleChange('name', e.target.value)} className={ic} />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="text-xs font-bold text-slate-500 block mb-1">직분</label>
+                                    <input value={form.role || ''} onChange={e => handleChange('role', e.target.value)} className={ic} />
+                                </div>
+                                <div>
+                                    <label className="text-xs font-bold text-slate-500 block mb-1">생년월일</label>
+                                    <input type="date" value={form.birthdate || ''} onChange={e => handleChange('birthdate', e.target.value)} className={ic} />
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="text-xs font-bold text-slate-500 block mb-1">성별</label>
+                                    <select value={form.gender || 'Male'} onChange={e => handleChange('gender', e.target.value)} className={ic}>
+                                        <option value="Male">남</option>
+                                        <option value="Female">여</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="text-xs font-bold text-slate-500 block mb-1">연락처</label>
+                                    <input value={form.contact || ''} onChange={e => handleChange('contact', e.target.value)} className={ic} placeholder="010-0000-0000" />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="text-xs font-bold text-slate-500 block mb-1">주소</label>
+                                <input value={form.address || ''} onChange={e => handleChange('address', e.target.value)} className={ic} />
+                                {addressChanged && <p className="text-xs text-amber-600 mt-1">⚠️ 주소 변경 시 좌표가 다시 계산됩니다</p>}
+                            </div>
+                            {type === 'leader' ? (
+                                <div>
+                                    <label className="text-xs font-bold text-slate-500 block mb-1">정원</label>
+                                    <input type="number" value={form.max_capacity || ''} onChange={e => handleChange('max_capacity', e.target.value)} className={ic} />
+                                </div>
+                            ) : (
+                                <>
+                                    <div>
+                                        <label className="text-xs font-bold text-slate-500 block mb-1">소속 리더</label>
+                                        <select value={form.leader_id || ''} onChange={e => handleChange('leader_id', e.target.value)} className={ic}>
+                                            <option value="">미배정</option>
+                                            {leaders?.map(l => <option key={l.id} value={l.id}>{l.name} ({l.current_members}/{l.max_capacity}명){l.current_members >= l.max_capacity ? ' [만석]' : ''}</option>)}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-bold text-slate-500 block mb-1">참여 상태</label>
+                                        <select value={form.status || 'wants_group'} onChange={e => handleChange('status', e.target.value)} className={ic}>
+                                            <option value="wants_group">참여희망 (B-1)</option>
+                                            <option value="no_group">참여안함 (B-2)</option>
+                                        </select>
+                                        <p className="text-xs text-slate-400 mt-1">리더가 배정되면 자동으로 '소속됨'으로 처리됩니다</p>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                        <div className="p-4 border-t bg-slate-50 flex gap-2 justify-end">
+                            <button onClick={onClose} className="px-4 py-2 border rounded-lg">취소</button>
+                            <button onClick={save} disabled={saving} className="px-4 py-2 bg-brand-600 text-white rounded-lg font-bold disabled:opacity-50">
+                                {saving ? '저장중...' : '저장'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const DuplicateCheckModal = ({ onClose, onUpdate }) => {
+            const [loading, setLoading] = useState(true), [duplicates, setDuplicates] = useState({ nameContactDups: [], leaderAsMember: [] });
+            useEffect(() => { checkDuplicates() }, []);
+            const checkDuplicates = async () => {
+                setLoading(true);
+                try {
+                    const { leaders, members } = await fetchFullData();
+                    // 1. 이름+연락처 기준 중복 체크 (리더 간, 순원 간, 리더-순원 간)
+                    const allPeople = [...leaders.map(l => ({ ...l, type: 'leader' })), ...members.map(m => ({ ...m, type: 'member' }))];
+                    const keyMap = {};
+                    allPeople.forEach(p => {
+                        const key = `${(p.name || '').trim()}_${(p.contact || '').trim()}`;
+                        if (key === '_') return;
+                        if (!keyMap[key]) keyMap[key] = [];
+                        keyMap[key].push(p);
+                    });
+                    const nameContactDups = Object.entries(keyMap).filter(([k, v]) => v.length > 1).map(([k, v]) => ({ key: k, people: v }));
+                    // 2. 리더가 순원으로도 등록된 경우 (이름+연락처 기준)
+                    const leaderKeys = new Set(leaders.map(l => `${(l.name || '').trim()}_${(l.contact || '').trim()}`));
+                    const leaderAsMember = members.filter(m => {
+                        const key = `${(m.name || '').trim()}_${(m.contact || '').trim()}`;
+                        return key !== '_' && leaderKeys.has(key);
+                    }).map(m => {
+                        const matchedLeader = leaders.find(l => `${(l.name || '').trim()}_${(l.contact || '').trim()}` === `${(m.name || '').trim()}_${(m.contact || '').trim()}`);
+                        return { member: m, leader: matchedLeader };
+                    });
+                    setDuplicates({ nameContactDups, leaderAsMember });
+                } catch (e) { alert(e.message) }
+                finally { setLoading(false) }
+            };
+            const deleteMember = async (id) => { if (!confirm("이 순원을 삭제하시겠습니까?")) return; await removeMember(id, null, 'DELETE'); await checkDuplicates(); onUpdate() };
+            const deleteLeader = async (id) => { if (!confirm("이 리더를 삭제하시겠습니까? (소속 순원은 미배정 상태가 됩니다)")) return; await request('DELETE_LEADER', { id }); await checkDuplicates(); onUpdate() };
+            const totalIssues = duplicates.nameContactDups.length + duplicates.leaderAsMember.length;
+            return (<div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"><div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col"><div className="px-6 py-4 border-b flex justify-between bg-slate-50"><div><b className="text-lg">🔍 중복 검사 결과</b> {!loading && <span className={`ml-2 text-sm ${totalIssues > 0 ? 'text-red-600' : 'text-green-600'}`}>{totalIssues > 0 ? `${totalIssues}건 발견` : '이상 없음 ✓'}</span>}</div><button onClick={onClose} className="text-slate-400 hover:text-slate-600">✕</button></div><div className="flex-1 overflow-auto p-6 space-y-6">{loading ? <div className="text-center py-12"><div className="w-8 h-8 border-4 border-brand-200 border-t-brand-600 rounded-full animate-spin mx-auto mb-4" />검사중...</div> : <>{duplicates.leaderAsMember.length > 0 && <div className="space-y-3"><div className="flex items-center gap-2 text-red-600 font-bold"><span className="text-lg">⚠️</span> 리더가 순원으로 등록됨 ({duplicates.leaderAsMember.length}건)</div><div className="text-xs text-slate-500 mb-2">리더가 다른 그룹의 순원으로도 등록되어 있습니다. 순원 기록을 삭제하는 것을 권장합니다.</div>{duplicates.leaderAsMember.map((d, i) => <div key={i} className="bg-red-50 border border-red-200 rounded-xl p-4"><div className="flex justify-between items-start"><div><div className="font-bold text-red-700">{d.member.name} <span className="text-xs font-normal">({d.member.contact})</span></div><div className="text-xs text-slate-600 mt-1"><span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded mr-2">리더</span> {d.leader?.role} · {d.leader?.address}</div><div className="text-xs text-slate-600 mt-1"><span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded mr-2">순원</span> {d.member.role} · {d.member.address}</div></div><button onClick={() => deleteMember(d.member.id)} className="text-xs bg-red-600 text-white px-3 py-1.5 rounded-lg hover:bg-red-700">순원 삭제</button></div></div>)}</div>}{duplicates.nameContactDups.length > 0 && <div className="space-y-3"><div className="flex items-center gap-2 text-amber-600 font-bold"><span className="text-lg">📋</span> 동일인 중복 등록 ({duplicates.nameContactDups.length}건)</div><div className="text-xs text-slate-500 mb-2">같은 이름과 연락처를 가진 사람이 여러 번 등록되어 있습니다.</div>{duplicates.nameContactDups.map((dup, i) => <div key={i} className="bg-amber-50 border border-amber-200 rounded-xl p-4"><div className="font-bold text-amber-700 mb-2">{dup.people[0]?.name} <span className="text-xs font-normal">({dup.people[0]?.contact})</span> - {dup.people.length}개 레코드</div><div className="space-y-2">{dup.people.map((p, j) => <div key={j} className="flex justify-between items-center bg-white rounded-lg p-2 text-sm"><div><span className={`text-xs px-2 py-0.5 rounded mr-2 ${p.type === 'leader' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-600'}`}>{p.type === 'leader' ? '리더' : '순원'}</span>{p.role} · {calcAge(p.birthdate)}세 · {p.address}</div><button onClick={() => p.type === 'leader' ? deleteLeader(p.id) : deleteMember(p.id)} className="text-xs text-red-600 hover:text-red-800 px-2">삭제</button></div>)}</div></div>)}</div>}{totalIssues === 0 && <div className="text-center py-12"><div className="text-6xl mb-4">✅</div><div className="text-xl font-bold text-green-600">중복 데이터가 없습니다</div><div className="text-sm text-slate-500 mt-2">모든 데이터가 정상입니다.</div></div>}</>}</div><div className="p-4 border-t bg-slate-50 flex justify-between"><button onClick={checkDuplicates} disabled={loading} className="text-sm bg-white border px-4 py-2 rounded-lg hover:bg-slate-50">🔄 다시 검사</button><button onClick={onClose} className="px-4 py-2 bg-brand-600 text-white rounded-lg font-bold">닫기</button></div></div></div>)
+        };
+
+        const LeaderUpload = ({ globalData, onRefresh }) => {
+            const getStoredLeaderForm = () => { try { const s = sessionStorage.getItem('LEADER_FORM'); return s ? JSON.parse(s) : null } catch { return null } };
+            const getStoredMemberForm = () => { try { const s = sessionStorage.getItem('MEMBER_FORM'); return s ? JSON.parse(s) : null } catch { return null } };
+            const [scope, setScope] = useState('LEADER'), [mode, setMode] = useState('csv'), [listTab, setListTab] = useState('LEADER');
+            // 전역 데이터 사용
+            const leaders = globalData?.leaders || [];
+            const members = globalData?.members || [];
+            const [processing, setProcessing] = useState(false), [logs, setLogs] = useState([]), [progress, setProgress] = useState(0);
+            const [form, setForm] = useState(() => getStoredLeaderForm() || { name: '', role: '집사', gender: 'Male', birthdate: '', contact: '', address: '', max_capacity: 10 });
+            const [mForm, setMForm] = useState(() => getStoredMemberForm() || { name: '', role: '성도', gender: 'Male', birthdate: '', contact: '', address: '', leader_id: '', status: 'wants_group' });
+            const [saving, setSaving] = useState(false), [selected, setSelected] = useState(null), [showDupCheck, setShowDupCheck] = useState(false);
+            const [editItem, setEditItem] = useState(null), [editType, setEditType] = useState(null);
+            const [searchQuery, setSearchQuery] = useState('');
+            const [sortBy, setSortBy] = useState('name'); // 'name' | 'age'
+
+            // 데이터 변경 후 새로고침은 onRefresh 호출
+            const loadData = () => onRefresh?.();
+
+            useEffect(() => { sessionStorage.setItem('LEADER_FORM', JSON.stringify(form)) }, [form]);
+            useEffect(() => { sessionStorage.setItem('MEMBER_FORM', JSON.stringify(mForm)) }, [mForm]);
+
+            const log = m => setLogs(p => [m, ...p]);
+
+            // 정렬 함수
+            const sortItems = (items) => {
+                return [...items].sort((a, b) => {
+                    if (sortBy === 'age') return calcAge(b.birthdate) - calcAge(a.birthdate);
+                    return (a.name || '').localeCompare(b.name || '', 'ko');
+                });
+            };
+
+            // 검색 필터링 + 정렬
+            const filteredLeaders = sortItems(leaders.filter(l => {
+                if (!searchQuery.trim()) return true;
+                const q = searchQuery.toLowerCase();
+                return l.name?.toLowerCase().includes(q) || l.contact?.includes(q) || l.address?.toLowerCase().includes(q);
+            }));
+
+            const filteredMembers = sortItems(members.filter(m => {
+                if (!searchQuery.trim()) return true;
+                const q = searchQuery.toLowerCase();
+                return m.name?.toLowerCase().includes(q) || m.contact?.includes(q) || m.address?.toLowerCase().includes(q);
+            }));
+
+            const downloadSampleCSV = () => {
+                let csvContent, filename;
+                if (scope === 'LEADER') {
+                    csvContent = "name,role,gender,birthdate,contact,address,max_capacity\n홍길동,집사,Male,1980-03-15,010-1234-5678,서울시 강남구 역삼동 123,10\n김영희,권사,Female,1973-08-22,010-9876-5432,서울시 서초구 서초동 456,8";
+                    filename = "리더_샘플.csv";
+                } else {
+                    csvContent = "name,role,gender,birthdate,contact,address,leader_name,status\n이철수,성도,Male,1990-05-10,010-1111-2222,서울시 송파구 잠실동 789,홍길동,wants_group\n박민영,청년,Female,1997-12-03,010-3333-4444,서울시 강동구 천호동 321,,no_group";
+                    filename = "순원_샘플.csv";
+                }
+                const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = filename;
+                link.click();
+            };
+
+            const upload = e => { const file = e.target.files?.[0]; if (!file) return; setProcessing(true); setLogs([]); setProgress(0); Papa.parse(file, { header: true, skipEmptyLines: true, complete: async r => { const rows = r.data; log(`${rows.length}개 처리 시작`); for (let i = 0; i < rows.length; i++) { const row = rows[i]; if (!row.name || !row.address) { log(`[SKIP] ${i + 1}행`); continue } try { const geo = await geocodeAddress(row.address); if (scope === 'LEADER') await insertLeader({ name: row.name, role: row.role || '성도', gender: row.gender || 'Male', birthdate: row.birthdate || '', contact: row.contact || '', address: row.address, lat: geo.lat, lng: geo.lng, max_capacity: parseInt(row.max_capacity) || 10, current_members: 0 }); else { let lid = null; if (row.leader_name) { const m = leaders.find(l => l.name === row.leader_name); if (m) lid = m.id } await insertMember({ name: row.name, role: row.role || '성도', gender: row.gender || 'Male', birthdate: row.birthdate || '', contact: row.contact || '', address: row.address, lat: geo.lat, lng: geo.lng, leader_id: lid, status: row.status || 'wants_group' }) } log(`[OK] ${row.name}`) } catch (err) { log(`[ERR] ${row.name}`) } setProgress(Math.round((i + 1) / rows.length * 100)); await sleep(GEOCODE_DELAY_MS) } setProcessing(false); loadData(); e.target.value = '' } }) };
+
+            const submit = async e => { e.preventDefault(); setSaving(true); try { if (scope === 'LEADER') { const geo = await geocodeAddress(form.address); await insertLeader({ ...form, max_capacity: parseInt(form.max_capacity), lat: geo.lat, lng: geo.lng, current_members: 0 }); alert("등록 완료"); setForm({ name: '', role: '집사', gender: 'Male', birthdate: '', contact: '', address: '', max_capacity: 10 }) } else { const geo = await geocodeAddress(mForm.address); await insertMember({ ...mForm, lat: geo.lat, lng: geo.lng, leader_id: mForm.leader_id ? parseInt(mForm.leader_id) : null, status: mForm.status || 'wants_group' }); alert("등록 완료"); setMForm({ name: '', role: '성도', gender: 'Male', birthdate: '', contact: '', address: '', leader_id: '', status: 'wants_group' }) } loadData() } catch (err) { alert(err.message) } finally { setSaving(false) } };
+
+            const delLeader = async (id, e) => { e.stopPropagation(); if (!confirm("삭제? 소속 순원은 미배정 상태가 됩니다.")) return; await deleteLeader(id); loadData() };
+            const delMember = async (id, e) => { e.stopPropagation(); if (!confirm("삭제?")) return; await removeMember(id, null, 'DELETE'); loadData() };
+
+            const openEdit = (item, type, e) => { e?.stopPropagation(); setEditItem(item); setEditType(type); };
+
+            // 순원을 리더로 승격시키는 함수
+            const promoteToLeader = async (member, e) => {
+                e?.stopPropagation();
+                if (!confirm(`${member.name}님을 리더로 세우시겠습니까?\n\n• 순원 목록에서 삭제됩니다\n• 리더 목록에 추가됩니다`)) return;
+                setProcessing(true);
+                try {
+                    // 1. 리더로 등록
+                    await insertLeader({
+                        name: member.name,
+                        role: member.role || '집사',
+                        gender: member.gender || 'Male',
+                        birthdate: member.birthdate || '',
+                        contact: member.contact || '',
+                        address: member.address || '',
+                        lat: member.lat || 0,
+                        lng: member.lng || 0,
+                        max_capacity: 10,
+                        current_members: 0
+                    });
+                    // 2. 순원에서 삭제
+                    await removeMember(member.id, member.leader_id, 'DELETE');
+                    alert(`${member.name}님이 리더로 등록되었습니다!`);
+                    loadData();
+                } catch (err) {
+                    alert(`실패: ${err.message}`);
+                } finally {
+                    setProcessing(false);
+                }
+            };
+
+            // 탭에 따라 CSV 형식으로 다운로드 (업로드 형식과 동일)
+            const exportLeadersCSV = () => {
+                const csvData = leaders.map(l => ({
+                    name: l.name,
+                    role: l.role || '',
+                    gender: l.gender || 'Male',
+                    birthdate: formatBirthdate(l.birthdate),
+                    contact: l.contact || '',
+                    address: l.address || '',
+                    max_capacity: l.max_capacity || 10
+                }));
+                const ws = XLSX.utils.json_to_sheet(csvData);
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, "리더");
+                XLSX.writeFile(wb, `리더_${new Date().toISOString().slice(0, 10)}.csv`, { bookType: 'csv' });
+            };
+
+            const exportMembersCSV = () => {
+                const csvData = members.map(m => {
+                    // status 결정: leader_id가 있으면 assigned, 없으면 기존 status 사용
+                    const effectiveStatus = m.leader_id ? 'assigned' : (m.status || 'wants_group');
+                    return {
+                        name: m.name,
+                        role: m.role || '',
+                        gender: m.gender || 'Male',
+                        birthdate: formatBirthdate(m.birthdate),
+                        contact: m.contact || '',
+                        address: m.address || '',
+                        leader_name: getLeaderName(m.leader_id) === '미배정' ? '' : getLeaderName(m.leader_id),
+                        status: effectiveStatus
+                    };
+                });
+                const ws = XLSX.utils.json_to_sheet(csvData);
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, "순원");
+                XLSX.writeFile(wb, `순원_${new Date().toISOString().slice(0, 10)}.csv`, { bookType: 'csv' });
+            };
+
+            // 일괄 삭제 함수
+            const deleteAllLeaders = async () => {
+                if (leaders.length === 0) { alert('삭제할 리더가 없습니다.'); return; }
+                if (!confirm(`정말로 리더 ${leaders.length}명을 모두 삭제하시겠습니까?\n\n⚠️ 주의: 소속 순원들은 미배정 상태가 됩니다.`)) return;
+                if (!confirm('⚠️ 이 작업은 되돌릴 수 없습니다. 정말 진행하시겠습니까?')) return;
+                setProcessing(true);
+                log('리더 일괄 삭제 시작...');
+                for (let i = 0; i < leaders.length; i++) {
+                    try {
+                        await deleteLeader(leaders[i].id);
+                        log(`[삭제] ${leaders[i].name}`);
+                    } catch (e) {
+                        log(`[오류] ${leaders[i].name}: ${e.message}`);
+                    }
+                    setProgress(Math.round((i + 1) / leaders.length * 100));
+                }
+                setProcessing(false);
+                loadData();
+                alert('리더 일괄 삭제 완료');
+            };
+
+            const deleteAllMembers = async () => {
+                if (members.length === 0) { alert('삭제할 순원이 없습니다.'); return; }
+                if (!confirm(`정말로 순원 ${members.length}명을 모두 삭제하시겠습니까?`)) return;
+                if (!confirm('⚠️ 이 작업은 되돌릴 수 없습니다. 정말 진행하시겠습니까?')) return;
+                setProcessing(true);
+                log('순원 일괄 삭제 시작...');
+                for (let i = 0; i < members.length; i++) {
+                    try {
+                        await removeMember(members[i].id, null, 'DELETE');
+                    } catch (e) {
+                        log(`[오류] ${members[i].name}: ${e.message}`);
+                    }
+                    setProgress(Math.round((i + 1) / members.length * 100));
+                }
+                setProcessing(false);
+                loadData();
+                alert('순원 일괄 삭제 완료');
+            };
+
+            const deleteAllUnassigned = async () => {
+                const unassignedMembers = members.filter(m => !m.leader_id);
+                if (unassignedMembers.length === 0) { alert('삭제할 미배정 인원이 없습니다.'); return; }
+                if (!confirm(`정말로 미배정 인원 ${unassignedMembers.length}명을 모두 삭제하시겠습니까?`)) return;
+                if (!confirm('⚠️ 이 작업은 되돌릴 수 없습니다. 정말 진행하시겠습니까?')) return;
+                setProcessing(true);
+                log('미배정 인원 일괄 삭제 시작...');
+                for (let i = 0; i < unassignedMembers.length; i++) {
+                    try {
+                        await removeMember(unassignedMembers[i].id, null, 'DELETE');
+                        log(`[삭제] ${unassignedMembers[i].name}`);
+                    } catch (e) {
+                        log(`[오류] ${unassignedMembers[i].name}: ${e.message}`);
+                    }
+                    setProgress(Math.round((i + 1) / unassignedMembers.length * 100));
+                }
+                setProcessing(false);
+                loadData();
+                alert('미배정 인원 일괄 삭제 완료');
+            };
+
+            const getLeaderName = (leaderId) => { const l = leaders.find(x => x.id === leaderId); return l ? l.name : '미배정'; };
+
+            const ic = "block w-full rounded-md border shadow-sm py-2 px-3 text-sm";
+
+            return (<div className="grid grid-cols-1 lg:grid-cols-3 gap-8 pb-12">
+                {selected && <Modal leader={selected} onClose={() => setSelected(null)} onUpdate={loadData} />}
+                {showDupCheck && <DuplicateCheckModal onClose={() => setShowDupCheck(false)} onUpdate={loadData} />}
+                {editItem && <EditModal item={editItem} type={editType} leaders={leaders} onClose={() => { setEditItem(null); setEditType(null); }} onUpdate={loadData} />}
+
+                {/* 왼쪽: 등록 폼 */}
+                <div className="space-y-4">
+                    <div className="bg-slate-100 p-1 rounded-xl flex">
+                        <button onClick={() => setScope('LEADER')} className={`flex-1 py-2 text-sm font-bold rounded-lg ${scope === 'LEADER' ? 'bg-white text-brand-600' : 'text-slate-500'}`}>리더</button>
+                        <button onClick={() => setScope('MEMBER')} className={`flex-1 py-2 text-sm font-bold rounded-lg ${scope === 'MEMBER' ? 'bg-white text-brand-600' : 'text-slate-500'}`}>소속원</button>
+                    </div>
+                    <div className="bg-white p-1 rounded-xl border flex">
+                        <button onClick={() => setMode('csv')} className={`flex-1 py-2 text-sm rounded-lg ${mode === 'csv' ? 'bg-brand-50 text-brand-700' : 'text-slate-500'}`}>CSV</button>
+                        <button onClick={() => setMode('manual')} className={`flex-1 py-2 text-sm rounded-lg ${mode === 'manual' ? 'bg-brand-50 text-brand-700' : 'text-slate-500'}`}>직접</button>
+                    </div>
+                    {mode === 'csv' ? (
+                        <div className="bg-white rounded-2xl border p-6 space-y-4">
+                            <button onClick={downloadSampleCSV} className="w-full text-xs bg-amber-50 text-amber-700 px-4 py-2 rounded-lg border border-amber-200 hover:bg-amber-100 font-medium">📥 {scope === 'LEADER' ? '리더' : '소속원'} 샘플 CSV 다운로드</button>
+                            <label className="block border-2 border-dashed rounded-xl p-6 text-center cursor-pointer border-brand-200 hover:border-brand-400">
+                                <input type="file" accept=".csv" onChange={upload} className="hidden" disabled={processing} />
+                                <span className="text-brand-600 font-medium">CSV 선택</span>
+                            </label>
+                            {processing && <div className="h-2 bg-slate-100 rounded-full"><div className="h-full bg-brand-500 rounded-full" style={{ width: `${progress}%` }} /></div>}
+                            <div className="h-40 bg-slate-900 rounded-lg p-3 overflow-auto font-mono text-xs text-green-400">{logs.map((l, i) => <div key={i}>{l}</div>)}</div>
+                        </div>
+                    ) : (
+                        <form onSubmit={submit} className="bg-white rounded-2xl border p-6 space-y-3">
+                            {scope === 'LEADER' ? <>
+                                <input required value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className={ic} placeholder="이름" />
+                                <input required value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} className={ic} placeholder="주소" />
+                                <div className="grid grid-cols-2 gap-2">
+                                    <input type="date" required value={form.birthdate} onChange={e => setForm({ ...form, birthdate: e.target.value })} className={ic} title="생년월일" />
+                                    <select value={form.gender} onChange={e => setForm({ ...form, gender: e.target.value })} className={ic}><option value="Male">남</option><option value="Female">여</option></select>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <input value={form.role} onChange={e => setForm({ ...form, role: e.target.value })} className={ic} placeholder="직분 (예: 집사)" />
+                                    <input value={form.contact} onChange={e => setForm({ ...form, contact: formatPhone(e.target.value) })} className={ic} placeholder="연락처" />
+                                </div>
+                                <input type="number" value={form.max_capacity} onChange={e => setForm({ ...form, max_capacity: e.target.value })} className={ic} placeholder="정원 (기본 10명)" min="1" />
+                            </> : <>
+                                <input required value={mForm.name} onChange={e => setMForm({ ...mForm, name: e.target.value })} className={ic} placeholder="이름" />
+                                <input required value={mForm.address} onChange={e => setMForm({ ...mForm, address: e.target.value })} className={ic} placeholder="주소" />
+                                <div className="grid grid-cols-2 gap-2">
+                                    <input type="date" required value={mForm.birthdate} onChange={e => setMForm({ ...mForm, birthdate: e.target.value })} className={ic} title="생년월일" />
+                                    <select value={mForm.gender} onChange={e => setMForm({ ...mForm, gender: e.target.value })} className={ic}><option value="Male">남</option><option value="Female">여</option></select>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <input value={mForm.role} onChange={e => setMForm({ ...mForm, role: e.target.value })} className={ic} placeholder="직분 (예: 성도)" />
+                                    <input value={mForm.contact} onChange={e => setMForm({ ...mForm, contact: formatPhone(e.target.value) })} className={ic} placeholder="연락처" />
+                                </div>
+                                <select value={mForm.leader_id} onChange={e => setMForm({ ...mForm, leader_id: e.target.value })} className={ic}>
+                                    <option value="">미배정 (리더 선택)</option>
+                                    {leaders.map(l => <option key={l.id} value={l.id}>{l.name} ({l.current_members}/{l.max_capacity}명){l.current_members >= l.max_capacity ? ' [만석]' : ''}</option>)}
+                                </select>
+                            </>}
+                            <button disabled={saving} className="w-full bg-brand-600 text-white py-2 rounded-lg font-bold">{saving ? '저장중...' : '등록'}</button>
+                        </form>
+                    )}
+                </div>
+
+                {/* 오른쪽: 리스트 (리더/순원 탭) */}
+                <div className="lg:col-span-2 bg-white rounded-2xl border flex flex-col h-[600px]">
+                    <div className="px-4 py-3 border-b bg-slate-50 space-y-3">
+                        {/* 탭 + 검색 */}
+                        <div className="flex items-center justify-between gap-4">
+                            <div className="flex bg-slate-200 p-0.5 rounded-lg flex-wrap">
+                                <button onClick={() => setListTab('LEADER')} className={`px-3 py-1 text-sm font-medium rounded ${listTab === 'LEADER' ? 'bg-white text-brand-600' : 'text-slate-500'}`}>리더 ({leaders.length})</button>
+                                <button onClick={() => setListTab('ASSIGNED')} className={`px-3 py-1 text-sm font-medium rounded ${listTab === 'ASSIGNED' ? 'bg-white text-blue-600' : 'text-slate-500'}`}>배정 ({members.filter(m => m.leader_id).length})</button>
+                                <button onClick={() => setListTab('UNASSIGNED')} className={`px-3 py-1 text-sm font-medium rounded ${listTab === 'UNASSIGNED' ? 'bg-white text-purple-600' : 'text-slate-500'}`}>미배정 ({members.filter(m => !m.leader_id).length})</button>
+                            </div>
+                            <div className="flex gap-2 flex-wrap">
+                                <button onClick={() => setShowDupCheck(true)} className="text-xs bg-red-50 text-red-600 px-3 py-1 rounded border border-red-200 hover:bg-red-100 font-medium">🔍 중복검사</button>
+                                {listTab === 'LEADER' && <button onClick={exportLeadersCSV} className="text-xs bg-green-50 text-green-700 px-3 py-1 rounded border border-green-200">📥 리더 CSV</button>}
+                                {(listTab === 'ASSIGNED' || listTab === 'UNASSIGNED') && <button onClick={exportMembersCSV} className="text-xs bg-green-50 text-green-700 px-3 py-1 rounded border border-green-200">📥 소속원 CSV</button>}
+                                {listTab === 'LEADER' && <button onClick={deleteAllLeaders} disabled={processing} className="text-xs bg-red-600 text-white px-3 py-1 rounded hover:bg-red-700 disabled:opacity-50">🗑️ 리더 전체삭제</button>}
+                                {listTab === 'ASSIGNED' && <button onClick={deleteAllMembers} disabled={processing} className="text-xs bg-red-600 text-white px-3 py-1 rounded hover:bg-red-700 disabled:opacity-50">🗑️ 소속원 전체삭제</button>}
+                                {listTab === 'UNASSIGNED' && <button onClick={deleteAllUnassigned} disabled={processing} className="text-xs bg-red-600 text-white px-3 py-1 rounded hover:bg-red-700 disabled:opacity-50">🗑️ 미배정 전체삭제</button>}
+                                <button onClick={loadData} className="text-xs bg-white px-2 py-1 rounded border">새로고침</button>
+                            </div>
+                        </div>
+                        {/* 검색창 + 정렬 */}
+                        <div className="flex gap-2 items-center">
+                            <input
+                                type="text"
+                                value={searchQuery}
+                                onChange={e => setSearchQuery(e.target.value)}
+                                placeholder="🔍 이름, 연락처, 주소로 검색..."
+                                className="flex-1 text-sm border rounded-lg px-3 py-2"
+                            />
+                            <div className="flex bg-slate-100 p-0.5 rounded text-xs">
+                                <button onClick={() => setSortBy('name')} className={`px-2 py-1 rounded ${sortBy === 'name' ? 'bg-white text-brand-600 font-bold' : 'text-slate-500'}`}>이름순</button>
+                                <button onClick={() => setSortBy('age')} className={`px-2 py-1 rounded ${sortBy === 'age' ? 'bg-white text-brand-600 font-bold' : 'text-slate-500'}`}>나이순</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="flex-1 overflow-auto">
+                        {listTab === 'LEADER' ? (
+                            filteredLeaders.length === 0 ? <div className="p-8 text-center text-slate-400"><div className="text-4xl mb-2">👤</div><div className="font-medium">등록된 리더가 없습니다</div><div className="text-sm mt-1">좌측에서 리더를 먼저 등록해주세요.</div></div> :
+                                filteredLeaders.map(l => (
+                                    <div key={l.id} onClick={() => setSelected(l)} className="p-4 border-b hover:bg-slate-50 cursor-pointer flex justify-between">
+                                        <div>
+                                            <b>{genderIcon(l.gender)} {l.name}</b> <span className="text-xs text-slate-500">{formatRole(l.role)} · {calcAge(l.birthdate)}세 ({formatBirthdate(l.birthdate)})</span>
+                                            {l.contact && <span className="text-xs text-slate-400 ml-2">📞 {l.contact}</span>}
+                                            <div className="text-sm text-slate-500">{l.address}</div>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <span className={`text-xs px-2 py-1 rounded-full ${l.current_members >= l.max_capacity ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{l.current_members}/{l.max_capacity}</span>
+                                            <button onClick={e => openEdit(l, 'leader', e)} className="text-slate-400 hover:text-brand-600">✏️</button>
+                                            <button onClick={e => delLeader(l.id, e)} className="text-slate-400 hover:text-red-600">🗑️</button>
+                                        </div>
+                                    </div>
+                                ))
+                        ) : listTab === 'ASSIGNED' ? (
+                            /* 소속됨 탭 (리더에게 배정된 순원) */
+                            (() => {
+                                const assigned = sortItems(members.filter(m => m.leader_id).filter(m => {
+                                    const q = searchQuery.toLowerCase();
+                                    return m.name?.toLowerCase().includes(q) || m.contact?.toLowerCase().includes(q) || m.address?.toLowerCase().includes(q);
+                                }));
+                                return assigned.length === 0 ? <div className="p-8 text-center text-slate-400"><div className="text-4xl mb-2">👥</div><div className="font-medium">배정된 인원이 없습니다</div></div> :
+                                    assigned.map(m => (
+                                        <div key={m.id} className="p-4 border-b hover:bg-blue-50 flex justify-between bg-blue-50/20">
+                                            <div>
+                                                <b>{genderIcon(m.gender)} {m.name}</b> <span className="text-xs text-slate-500">{formatRole(m.role)} · {calcAge(m.birthdate)}세 ({formatBirthdate(m.birthdate)})</span>
+                                                {m.contact && <span className="text-xs text-slate-400 ml-2">📞 {m.contact}</span>}
+                                                <div className="text-sm text-slate-500">{m.address}</div>
+                                                <div className="text-xs mt-1">
+                                                    <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-700">👤 {getLeaderName(m.leader_id)}</span>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <button onClick={e => promoteToLeader(m, e)} className="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded hover:bg-amber-200" title="리더로 세우기">👑</button>
+                                                <button onClick={e => openEdit(m, 'member', e)} className="text-slate-400 hover:text-brand-600">✏️</button>
+                                                <button onClick={e => delMember(m.id, e)} className="text-slate-400 hover:text-red-600">🗑️</button>
+                                            </div>
+                                        </div>
+                                    ))
+                            })()
+                        ) : (
+                            /* 미배정 탭 */
+                            (() => {
+                                const unassigned = sortItems(members.filter(m => !m.leader_id).filter(m => {
+                                    const q = searchQuery.toLowerCase();
+                                    return m.name?.toLowerCase().includes(q) || m.contact?.toLowerCase().includes(q) || m.address?.toLowerCase().includes(q);
+                                }));
+                                return unassigned.length === 0 ? (
+                                    <div className="text-center text-slate-400 py-8">미배정 인원이 없습니다</div>
+                                ) : unassigned.map(m => (
+                                    <div key={m.id} className="p-3 border-b hover:bg-slate-50 flex justify-between items-start">
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                <b className="truncate">{genderIcon(m.gender)} {m.name}</b>
+                                                <span className="text-xs text-slate-500">{calcAge(m.birthdate)}세</span>
+                                            </div>
+                                            <div className="text-xs text-slate-400 truncate">{m.address}</div>
+                                        </div>
+                                        <div className="flex items-center gap-1 ml-2">
+                                            <button onClick={(e) => promoteToLeader(m, e)} className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded hover:bg-amber-200" title="리더로 세우기">👑</button>
+                                            <button onClick={(e) => { e.stopPropagation(); openEdit(m, 'member'); }} className="text-slate-400 hover:text-brand-600 text-sm">✏️</button>
+                                            <button onClick={(e) => delMember(m.id, e)} className="text-slate-400 hover:text-red-600 text-sm">🗑️</button>
+                                        </div>
+                                    </div>
+                                ));
+                            })()
+                        )}
+                    </div>
+                </div>
+            </div>)
+        };
+
+        const MemberMatching = ({ globalData, onRefresh, setGlobalData, setSyncing }) => {
+            const getStoredForm = () => { try { const s = sessionStorage.getItem('MATCH_FORM'); return s ? JSON.parse(s) : null } catch { return null } };
+            const [form, setForm] = useState(() => getStoredForm() || { name: '', role: '성도', birthdate: '', gender: 'Male', address: '' }), [loading, setLoading] = useState(false), [candidates, setCandidates] = useState([]), [target, setTarget] = useState(null), [selId, setSelId] = useState(null); const mapRef = useRef(null), mapInst = useRef(null), markers = useRef([]);
+            // const [showUnassigned, setShowUnassigned] = useState(false); // Removed: Always visible in footer
+            // const [unassignedList, setUnassignedList] = useState([]); // Derived directly from globalData
+            const [selectedMemberId, setSelectedMemberId] = useState(null);
+            const [unassignedSort, setUnassignedSort] = useState('name'); // 'name' | 'age'
+
+            const leaders = globalData?.leaders || [];
+            const allMembers = globalData?.members || [];
+
+            // Calculate and sort unassigned list (참여희망만 표시)
+            const unassignedList = useMemo(() => {
+                const list = allMembers.filter(m => !m.leader_id && (m.status || 'wants_group') === 'wants_group');
+                return list.sort((a, b) => {
+                    if (unassignedSort === 'name') return (a.name || '').localeCompare(b.name || '');
+                    if (unassignedSort === 'age') return (a.birthdate || '').localeCompare(b.birthdate || ''); // Birthdate string compare works for YYYY-MM-DD (older first)
+                    return 0;
+                });
+            }, [allMembers, unassignedSort]);
+
+            useEffect(() => { sessionStorage.setItem('MATCH_FORM', JSON.stringify(form)) }, [form]);
+            useEffect(() => { if (mapRef.current && window.google && !mapInst.current) mapInst.current = new window.google.maps.Map(mapRef.current, { center: { lat: 37.5665, lng: 126.9780 }, zoom: 12, disableDefaultUI: true, zoomControl: true, styles: MAP_STYLES }) }, []);
+            useEffect(() => {
+                if (!mapInst.current || !window.google) return;
+                markers.current.forEach(m => m.setMap(null));
+                markers.current = [];
+                const bounds = new window.google.maps.LatLngBounds();
+
+                // 신규/검색 위치 마커
+                if (target) {
+                    const m = new window.google.maps.Marker({
+                        position: target,
+                        map: mapInst.current,
+                        animation: window.google.maps.Animation.DROP,
+                        icon: { path: window.google.maps.SymbolPath.CIRCLE, fillColor: '#dc2626', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 12 }
+                    });
+                    const info = new window.google.maps.InfoWindow({ content: '<div style="padding:8px;font-family:sans-serif"><b style="color:#dc2626">📍 신규 인원 위치</b></div>' });
+                    m.addListener('mouseover', () => info.open(mapInst.current, m));
+                    m.addListener('mouseout', () => info.close());
+                    markers.current.push(m);
+                    bounds.extend(target);
+                }
+
+                // 추천 리더(Candidates) 마커
+                candidates.forEach((l, i) => {
+                    const full = l.current_members >= l.max_capacity;
+                    const m = new window.google.maps.Marker({
+                        position: { lat: l.lat, lng: l.lng },
+                        map: mapInst.current,
+                        icon: { path: window.google.maps.SymbolPath.CIRCLE, fillColor: full ? '#94a3b8' : '#3b82f6', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2, scale: 12 },
+                        label: { text: String(i + 1), color: '#fff', fontSize: '11px', fontWeight: 'bold' }
+                    });
+                    const info = new window.google.maps.InfoWindow({
+                        content: `<div style="padding:10px;font-family:sans-serif;min-width:180px"><div style="font-size:15px;font-weight:bold;color:#1e40af;margin-bottom:4px">${l.name} ${l.role}</div><div style="font-size:12px;color:#64748b">${calcAge(l.birthdate)}세 · ${l.gender === 'Male' ? '남성' : '여성'}</div><div style="font-size:11px;color:#94a3b8;margin:6px 0;padding-top:6px;border-top:1px solid #e2e8f0">${l.address}</div><div style="display:flex;gap:8px;font-size:12px"><span style="background:${full ? '#fee2e2' : '#dcfce7'};color:${full ? '#dc2626' : '#16a34a'};padding:2px 8px;border-radius:4px;font-weight:600">정원: ${l.current_members}/${l.max_capacity}명</span><span style="background:#f1f5f9;padding:2px 8px;border-radius:4px">거리: ${l.distance.toFixed(1)}km</span></div></div>`
+                    });
+                    m.addListener('mouseover', () => info.open(mapInst.current, m));
+                    m.addListener('mouseout', () => info.close());
+                    m.addListener('click', () => { info.open(mapInst.current, m); setSelId(l.id); });
+                    markers.current.push(m);
+                    bounds.extend({ lat: l.lat, lng: l.lng });
+                });
+
+                if (target || candidates.length) {
+                    mapInst.current.fitBounds(bounds);
+                    window.google.maps.event.addListenerOnce(mapInst.current, 'idle', () => { if (mapInst.current.getZoom() > 15) mapInst.current.setZoom(15); });
+                }
+            }, [candidates, target]);
+
+            // 미배정 인원 선택
+            const selectUnassigned = async (member) => {
+                setSelectedMemberId(member.id);
+                setForm({ name: member.name, role: member.role || '성도', birthdate: formatBirthdate(member.birthdate), gender: member.gender || 'Male', address: member.address || '' });
+                // setShowUnassigned(false); // Removed
+                // 자동으로 리더 검색 (Direct Action)
+                if (member.address && member.birthdate) {
+                    setLoading(true); setCandidates([]);
+                    try {
+                        // Optimizing: Use local 'leaders' data instead of fetching
+                        // const leaders = await fetchLeaders();
+
+                        if (member.lat && member.lng) {
+                            setTarget({ lat: member.lat, lng: member.lng });
+                            const res = findClosest(member.lat, member.lng, member.birthdate, leaders, 5);
+                            setCandidates(res);
+                            if (!res.length) alert("리더 없음");
+                        } else {
+                            const geo = await geocodeAddress(member.address);
+                            setTarget({ lat: geo.lat, lng: geo.lng });
+                            const res = findClosest(geo.lat, geo.lng, member.birthdate, leaders, 5);
+                            setCandidates(res);
+                            if (!res.length) alert("리더 없음");
+                        }
+                    } catch (e) { alert(e.message); }
+                    finally { setLoading(false); }
+                }
+            };
+
+            const search = async e => { e?.preventDefault(); if (!form.address || !form.birthdate) { alert("주소/생년월일 필요"); return } setLoading(true); setCandidates([]); try { const geo = await geocodeAddress(form.address); setTarget({ lat: geo.lat, lng: geo.lng }); setForm(p => ({ ...p, address: geo.formattedAddress })); const res = findClosest(geo.lat, geo.lng, form.birthdate, leaders, 5); setCandidates(res); if (!res.length) alert("리더 없음") } catch (e) { alert(e.message) } finally { setLoading(false) } };
+
+            // 리더 모집 모달
+            const RecruitmentModal = ({ leader, members, leaders, onClose, onAssign }) => {
+                const [candidates, setCandidates] = useState({ unassigned: [], assigned: [] });
+
+                useEffect(() => {
+                    setCandidates(findRecruits(leader, members, 5));
+                }, [leader, members]); // members도 의존성 추가
+
+                const CandidateRow = ({ m, type }) => (
+                    <div className="flex justify-between items-center p-2 hover:bg-slate-50 border-b border-slate-100 last:border-0">
+                        <div>
+                            <div className="flex items-center gap-2">
+                                <b>{m.name}</b>
+                                <span className="text-xs text-slate-500">{m.role}·{calcAge(m.birthdate)}세</span>
+                                {type === 'assigned' && <span className="text-[10px] bg-sky-100 text-sky-700 px-1 rounded">현: {leaders.find(l => l.id === m.leader_id)?.name}</span>}
+                            </div>
+                            <div className="text-[10px] text-slate-400 mt-0.5">
+                                {Number(m.distance).toFixed(1)}km · 나이차 {m.ageDiff}세 · {m.address}
+                            </div>
+                        </div>
+                        <button
+                            onClick={() => onAssign(m)}
+                            className="bg-blue-50 text-blue-600 hover:bg-blue-100 px-3 py-1 rounded text-xs font-bold transition-colors"
+                        >
+                            영입
+                        </button>
+                    </div>
+                )
+
+                return (
+                    <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-4" onClick={onClose}>
+                        <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                            <div className="bg-gradient-to-r from-blue-600 to-indigo-600 p-4 text-white flex justify-between items-center">
+                                <h2 className="font-bold text-lg">📢 {leader.name} 리더원 모집 추천</h2>
+                                <button onClick={onClose} className="text-white/70 hover:text-white text-2xl">&times;</button>
+                            </div>
+                            {(!leader.lat || !leader.lng) && (
+                                <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-amber-800 text-xs">
+                                    ⚠️ 리더의 위치 정보가 없어 거리 기반 추천이 불완전합니다. 리더 정보 수정에서 주소를 입력해주세요.
+                                </div>
+                            )}
+                            <div className="p-4 max-h-[70vh] overflow-y-auto">
+                                <div className="mb-6">
+                                    <h3 className="text-sm font-bold text-red-600 border-b border-red-100 pb-2 mb-2 flex items-center gap-2">
+                                        <span className="bg-red-100 px-2 py-0.5 rounded-full text-[10px]">1순위</span> 미배정 인원 추천
+                                    </h3>
+                                    {candidates.unassigned.length === 0 ? <p className="text-center text-slate-400 text-xs py-4">추천할 미배정 인원이 없습니다 (거리/위치확인)</p> :
+                                        candidates.unassigned.map(m => <CandidateRow key={m.id} m={m} type="unassigned" />)
+                                    }
+                                </div>
+
+                                <div>
+                                    <h3 className="text-sm font-bold text-sky-600 border-b border-sky-100 pb-2 mb-2 flex items-center gap-2">
+                                        <span className="bg-sky-100 px-2 py-0.5 rounded-full text-[10px]">2순위</span> 타 그룹 인원 추천 (이동/교환)
+                                    </h3>
+                                    {candidates.assigned.length === 0 ? <p className="text-center text-slate-400 text-xs py-4">추천할 인원이 없습니다</p> :
+                                        candidates.assigned.map(m => <CandidateRow key={m.id} m={m} type="assigned" />)
+                                    }
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )
+            }
+
+            const assign = async () => {
+                if (!selId || !target) return;
+                const name = candidates.find(c => c.id === selId)?.name;
+                if (!confirm(`${form.name}→${name} 배정?`)) return;
+
+                // Optimistic Update
+                const backup = { ...globalData };
+                const newMember = {
+                    id: selectedMemberId || Date.now(), // Temporary ID if new
+                    name: form.name, role: form.role, birthdate: form.birthdate,
+                    gender: form.gender, address: form.address,
+                    lat: target.lat, lng: target.lng, leader_id: selId
+                };
+
+                let newMembers = [...allMembers];
+                if (selectedMemberId) {
+                    newMembers = newMembers.map(m => m.id === selectedMemberId ? newMember : m);
+                } else {
+                    newMembers.push(newMember);
+                }
+
+                const newLeaders = leaders.map(l => String(l.id) === String(selId) ? { ...l, current_members: (l.current_members || 0) + 1 } : l);
+
+                setGlobalData({ ...globalData, members: newMembers, leaders: newLeaders });
+                setLoading(true);
+                setSyncing?.(true);
+
+                try {
+                    if (selectedMemberId) {
+                        await updateMember(selectedMemberId, { leader_id: selId });
+                    } else {
+                        await insertMember(newMember);
+                    }
+                    // alert("완료"); // No alert for speed
+                    setForm({ name: '', role: '성도', birthdate: '', gender: 'Male', address: '' });
+                    setCandidates([]); setTarget(null); setSelId(null); setSelectedMemberId(null);
+                    // onRefresh?.(); // Skip refresh
+                } catch (e) {
+                    alert(e.message);
+                    setGlobalData(backup); // Revert
+                } finally {
+                    setLoading(false);
+                    setSyncing?.(false);
+                }
+            };
+
+            const assignUnassigned = async () => {
+                if (!form.name || !form.birthdate) { alert("이름/생년월일 필요"); return; }
+                if (!confirm(`${form.name}님을 미배정으로 등록하시겠습니까?`)) return;
+
+                // Optimistic Logic
+                const backup = { ...globalData };
+                let lat = target?.lat, lng = target?.lng;
+
+                // Note: Geocoding is sync-blocking if we need it for optimistic update.
+                // Alternatively, we optimistically add without coords first, or clear coords if not provided.
+                // For simplicity, we'll try to use what we have or placeholder.
+                // Real coordinate fetch happens in background is harder, so we just wait for explicit geocoding in 'search' usually.
+                // If user didn't search, we might not have lat/lng. Optimistic update might lack lat/lng.
+                // We will rely on server response/refresh for full consistency, but updating list immediately.
+
+                const newMember = {
+                    id: selectedMemberId || Date.now(),
+                    name: form.name, role: form.role, birthdate: form.birthdate,
+                    gender: form.gender, address: form.address,
+                    lat: lat || 0, lng: lng || 0, leader_id: ''
+                };
+
+                let newMembers = [...allMembers];
+                if (selectedMemberId) {
+                    newMembers = newMembers.map(m => m.id === selectedMemberId ? newMember : m);
+                } else {
+                    newMembers.push(newMember);
+                }
+
+                setGlobalData({ ...globalData, members: newMembers });
+                setLoading(true);
+                setSyncing?.(true);
+
+                try {
+                    if (!lat && form.address) {
+                        try {
+                            const geo = await geocodeAddress(form.address);
+                            lat = geo.lat; lng = geo.lng;
+                            newMember.lat = lat; newMember.lng = lng; // Refine for accurate insert
+                        } catch (e) { console.warn("주소 변환 실패:", e); }
+                    }
+
+                    if (selectedMemberId) {
+                        await updateMember(selectedMemberId, {
+                            name: form.name, role: form.role, birthdate: form.birthdate,
+                            gender: form.gender, address: form.address,
+                            lat: lat, lng: lng, leader_id: ''
+                        });
+                    } else {
+                        await insertMember({ ...newMember, lat: lat, lng: lng });
+                    }
+                    // alert("미배정 등록 완료");
+                    setForm({ name: '', role: '성도', birthdate: '', gender: 'Male', address: '' });
+                    setCandidates([]); setTarget(null); setSelId(null); setSelectedMemberId(null);
+                    // onRefresh?.();
+                } catch (e) {
+                    alert(e.message);
+                    setGlobalData(backup);
+                } finally {
+                    setLoading(false);
+                    setSyncing?.(false);
+                }
+            };
+
+            const ic = "block w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm";
+            const selectLeader = (leader) => { setSelId(leader.id); if (mapInst.current && window.google) { mapInst.current.panTo({ lat: leader.lat, lng: leader.lng }); mapInst.current.setZoom(14); } };
+            return (<div className="pb-12"><div className="grid grid-cols-1 xl:grid-cols-12 gap-6 min-h-[600px]"><div className="xl:col-span-5 space-y-6"><div className="bg-white rounded-2xl border"><div className="px-6 py-4 border-b bg-slate-50 flex justify-between items-center"><b>① 정보 입력</b></div>
+                <form onSubmit={search} className="p-6 space-y-4"><div className="grid grid-cols-2 gap-4"><div><label className="text-xs font-bold text-slate-500">이름</label><input required value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className={ic} /></div><div><label className="text-xs font-bold text-slate-500">직분</label><input value={form.role} onChange={e => setForm({ ...form, role: e.target.value })} className={ic} /></div></div><div className="grid grid-cols-2 gap-4"><div><label className="text-xs font-bold text-slate-500">생년월일</label><input type="date" required value={form.birthdate} onChange={e => setForm({ ...form, birthdate: e.target.value })} className={ic} /></div><div><label className="text-xs font-bold text-slate-500">성별</label><select value={form.gender} onChange={e => setForm({ ...form, gender: e.target.value })} className={ic}><option value="Male">남성</option><option value="Female">여성</option></select></div></div><div><label className="text-xs font-bold text-slate-500">주소</label><input required value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} className={ic} /></div>
+                    <div className="flex gap-2">
+                        <button disabled={loading} className="flex-1 bg-brand-600 text-white font-bold py-3 rounded-xl">{loading ? '검색중...' : '🔍 리더 찾기'}</button>
+                        <button type="button" onClick={assignUnassigned} disabled={loading} className="w-24 bg-slate-100 text-slate-600 font-bold py-3 rounded-xl hover:bg-slate-200">미배정 저장</button>
+                    </div>
+                </form></div>{candidates.length > 0 && <div className="bg-white rounded-2xl border animate-fade-in-up"><div className="px-6 py-4 border-b bg-slate-50 flex justify-between items-center"><b>② 추천 결과</b><span className="text-xs text-slate-400">상위 5순위</span></div><div className="p-4 space-y-3 max-h-[400px] overflow-y-auto">{candidates.map((l, i) => <div key={l.id} onClick={() => selectLeader(l)} className={`p-4 rounded-xl border cursor-pointer ${selId === l.id ? 'border-brand-500 bg-brand-50 ring-1 ring-brand-500' : 'border-slate-200 hover:border-brand-300'}`}><div className="flex justify-between"><div><div className="flex items-center gap-2"><span className="w-5 h-5 rounded-full bg-brand-100 text-brand-600 text-xs font-bold flex items-center justify-center">{i + 1}</span><b>{l.name}</b><span className="text-xs text-slate-500">{l.role} · {calcAge(l.birthdate)}세</span></div><div className="text-xs text-slate-500 mt-1 ml-7">{l.address}</div><div className="flex gap-2 mt-2 text-xs ml-7"><span className={`px-2 py-1 rounded ${l.current_members >= l.max_capacity ? 'bg-red-50 text-red-600' : 'bg-slate-100'}`}>{l.current_members}/{l.max_capacity}명</span><span className="px-2 py-1 rounded bg-slate-100">나이차 {l.ageDiff}살</span></div></div><div className="text-right"><span className="text-xl font-black text-brand-600">{l.distance.toFixed(1)}<span className="text-xs text-slate-400">km</span></span>{selId === l.id && <div className="text-brand-600 mt-1">✓</div>}</div></div></div>)}</div><div className="p-4 border-t bg-slate-50"><button onClick={assign} disabled={!selId || loading} className="w-full bg-green-600 text-white font-bold py-3 rounded-xl disabled:bg-slate-300">✓ 배정</button></div></div>}</div>
+
+                <div className="xl:col-span-7 space-y-6">
+                    {/* Map Card */}
+                    <div className="bg-white rounded-2xl border overflow-hidden h-[400px] xl:h-[500px] shadow-sm"><div ref={mapRef} className="w-full h-full bg-slate-100" /></div>
+
+                    {/* Unassigned List Card */}
+                    <div className="bg-white rounded-2xl border p-5 shadow-sm">
+                        <div className="flex justify-between items-center mb-4">
+                            <div className="text-base font-bold text-slate-700 flex items-center gap-2">
+                                <span>📋</span> 미배정 인원 ({unassignedList.length})
+                            </div>
+                            <div className="flex bg-slate-100 rounded-lg p-1">
+                                <button onClick={() => setUnassignedSort('name')} className={`px-3 py-1 text-xs rounded-md transition-all font-bold ${unassignedSort === 'name' ? 'bg-white shadow text-slate-700' : 'text-slate-400 hover:text-slate-600'}`}>이름순</button>
+                                <button onClick={() => setUnassignedSort('age')} className={`px-3 py-1 text-xs rounded-md transition-all font-bold ${unassignedSort === 'age' ? 'bg-white shadow text-slate-700' : 'text-slate-400 hover:text-slate-600'}`}>생년월일순</button>
+                            </div>
+                        </div>
+                        {unassignedList.length === 0 ? (
+                            <div className="text-center text-slate-400 text-sm py-4 italic bg-slate-50 rounded-lg">미배정 인원이 없습니다.</div>
+                        ) : (
+                            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 max-h-[300px] overflow-y-auto pr-2 scrollbar-thin">
+                                {unassignedList.map(m => (
+                                    <div key={m.id} onClick={() => selectUnassigned(m)} className={`p-2.5 border rounded-lg cursor-pointer hover:bg-slate-50 hover:shadow-sm transition-all flex flex-col gap-1 ${selectedMemberId === m.id ? 'bg-amber-50 border-amber-300 ring-1 ring-amber-300' : 'border-slate-100'}`}>
+                                        <div className="flex justify-between items-center">
+                                            <b className="text-sm text-slate-700 truncate">{m.name}</b>
+                                            <span className="text-xs text-slate-400">{formatRole(m.role)}</span>
+                                        </div>
+                                        <div className="text-[10px] text-slate-400 flex justify-between">
+                                            <span>{genderIcon(m.gender)} {calcAge(m.birthdate)}세</span>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div></div></div>)
+        };
+
+        const Dashboard = ({ globalData, onRefresh, setGlobalData }) => {
+            // 지도 관련 상태
+            const mapRef = useRef(null);
+            const mapInst = useRef(null);
+            const markers = useRef([]);
+            const polylines = useRef([]);
+            const memberMarkersMap = useRef({}); // { memberId: markerInstance }
+            const leaderMemberGroupMarkers = useRef({}); // { leaderId: [memberMarkerInstance] }
+            const [unmappedCount, setUnmappedCount] = useState(0); // 위치 정보 없는 미배정 인원 수
+            const allData = useRef({ leaders: [], members: [] });
+            const [loading, setLoading] = useState(false), [stats, setStats] = useState({ leaderCount: 0, memberCount: 0, unassignedCount: 0, occupancyRate: 0, ageGroups: {}, genderRatio: { male: 0, female: 0 } });
+            const [dongStats, setDongStats] = useState({});
+            const [searchQuery, setSearchQuery] = useState(''), [searchResults, setSearchResults] = useState([]), [showResults, setShowResults] = useState(false);
+            // 리더 클릭 시 순원 표시용
+            const [selectedLeader, setSelectedLeader] = useState(null);
+            const selectedLeaderRef = useRef(null);  // 이벤트 핸들러에서 최신값 참조용
+            const [leaderMembers, setLeaderMembers] = useState([]);
+            const [memberSortBy, setMemberSortBy] = useState('name'); // 'name' | 'age'
+            const [editItem, setEditItem] = useState(null);
+            const [editType, setEditType] = useState(null);
+            const [mapInitialized, setMapInitialized] = useState(false);
+            const [geocodeProgress, setGeocodeProgress] = useState(null); // { current, total } 일괄 갱신 진행률
+
+            // selectedLeader 변경 시 ref도 동기화
+            useEffect(() => { selectedLeaderRef.current = selectedLeader; }, [selectedLeader]);
+
+            // 통일된 순원 기본 색상
+            const MEMBER_DEFAULT_COLOR = '#14b8a6';
+            const MEMBER_UNASSIGNED_COLOR = '#ef4444';
+            const HIGHLIGHT_COLOR = '#fbbf24';
+
+            // globalData 변경 시 통계 및 지도 업데이트
+            useEffect(() => {
+                if (!globalData?.loaded) return;
+                const leaders = globalData.leaders || [];
+                const members = globalData.members || [];
+                allData.current = { leaders, members };
+
+                const un = members.filter(m => !m.leader_id).length;
+                const cap = leaders.reduce((s, l) => s + (l.max_capacity || 0), 0);
+                const occ = cap > 0 ? Math.round((members.length - un) / cap * 100) : 0;
+                const ag = { '20대': 0, '30대': 0, '40대': 0, '50대': 0, '60대+': 0 };
+                const gr = { male: 0, female: 0 };
+                members.forEach(m => {
+                    const a = calcAge(m.birthdate);
+                    if (a < 30) ag['20대']++; else if (a < 40) ag['30대']++; else if (a < 50) ag['40대']++; else if (a < 60) ag['50대']++; else ag['60대+']++;
+                    const g = String(m.gender || '').toLowerCase();
+                    if (g === 'male' || g === 'm' || g === '남' || g === '남성') gr.male++;
+                    else if (g === 'female' || g === 'f' || g === '여' || g === '여성') gr.female++;
+                });
+                setStats({ leaderCount: leaders.length, memberCount: members.length, unassignedCount: un, occupancyRate: occ, ageGroups: ag, genderRatio: gr });
+
+                // 동별 인원 통계 계산
+                const dongCounts = {};
+                [...leaders, ...members].forEach(p => {
+                    if (!p.address) return;
+                    // 주소에서 동/리 추출 (예: "역삼동", "창우동", "서초동")
+                    const match = p.address.match(/([\uac00-\ud7af]+[동리음면])/);
+                    if (match) {
+                        const dong = match[1];
+                        dongCounts[dong] = (dongCounts[dong] || 0) + 1;
+                    }
+                });
+                setDongStats(dongCounts);
+
+                // 지도 초기화/업데이트
+                if (leaders.length > 0 || members.length > 0) {
+                    initMap(leaders, members);
+                }
+
+                // 선택된 리더가 있으면 해당 순원 목록 갱신
+                if (selectedLeader) {
+                    const updatedLeader = leaders.find(l => String(l.id) === String(selectedLeader.id));
+                    if (updatedLeader) {
+                        setSelectedLeader(updatedLeader);
+                        const updatedMembers = members.filter(m => String(m.leader_id) === String(selectedLeader.id));
+                        setLeaderMembers(updatedMembers);
+                    } else {
+                        setSelectedLeader(null);
+                        setLeaderMembers([]);
+                    }
+                }
+            }, [globalData]);
+
+            // 새로고침 버튼 핸들러
+            const load = () => {
+                setLoading(true);
+                onRefresh?.();
+                setTimeout(() => setLoading(false), 500);
+            };
+
+            // 일괄 위치 정보 갱신 (누락된 인원)
+            const fixMissingLocations = async () => {
+                const { members } = allData.current;
+                const targets = members.filter(m =>
+                    m.address &&
+                    (!m.lat || !m.lng || m.lat === 0 || m.lng === 0)
+                );
+
+                if (targets.length === 0) { alert("갱신할 대상이 없습니다."); return; }
+                if (!confirm(`${targets.length}명의 위치 정보를 갱신하시겠습니까?\n약간의 시간이 소요됩니다.`)) return;
+
+                setGeocodeProgress({ current: 0, total: targets.length });
+                const backup = { ...globalData };
+                let successCount = 0;
+                let lastError = null;
+                let updatedMembers = [...members];
+
+                // 중단 플래그
+                let stopped = false;
+
+                try {
+                    for (let i = 0; i < targets.length; i++) {
+                        if (stopped) break;
+                        const m = targets[i];
+                        try {
+                            const geo = await geocodeAddress(m.address);
+                            // 로컬 업데이트
+                            updatedMembers = updatedMembers.map(mem => mem.id === m.id ? { ...mem, lat: geo.lat, lng: geo.lng } : mem);
+                            setGlobalData(prev => ({ ...prev, members: updatedMembers })); // 실시간 반영
+
+                            // 서버 업데이트
+                            await updateMember(m.id, { lat: geo.lat, lng: geo.lng });
+                            successCount++;
+                        } catch (e) {
+                            console.warn(`Geocode fail for ${m.name}:`, e);
+                            lastError = e;
+                            if (String(e).includes('OVER_QUERY_LIMIT')) {
+                                await sleep(2000); // 쿨다운
+                            }
+                            if (String(e).includes('REQUEST_DENIED')) {
+                                stopped = true; // API 미활성화 가능성 -> 중단
+                            }
+                        }
+                        setGeocodeProgress({ current: i + 1, total: targets.length });
+                        await sleep(600); // API Rate Limit 방지 (여유있게 증량)
+                    }
+
+                    if (successCount === 0 && lastError) {
+                        alert(`갱신 실패: 단 한 명도 갱신되지 않았습니다.\n오류: ${lastError.message}\n\n[체크포인트]\n1. Google Cloud Console에서 'Geocoding API'가 활성화되어 있는지 확인하세요.\n2. API 키 할당량이 충분한지 확인하세요.`);
+                    } else if (stopped) {
+                        alert(`중단됨: 일부 갱신 실패 (${successCount}/${targets.length})\n오류: ${lastError.message}\nAPI 키 권한을 확인해주세요.`);
+                    } else {
+                        alert(`완료: ${successCount}/${targets.length}명 갱신됨${successCount < targets.length ? `\n(${targets.length - successCount}명 실패: 주소 오류 등)` : ''}`);
+                    }
+                } catch (e) {
+                    console.error(e);
+                    alert("시스템 오류: " + e.message);
+                } finally {
+                    setGeocodeProgress(null);
+                    // load(); // 최종 로드는 생략 (서버 반영 딜레이로 사라짐 방지)
+                }
+            };
+
+            // 검색 기능
+            const handleSearch = (query) => {
+                setSearchQuery(query);
+                if (!query.trim()) { setSearchResults([]); setShowResults(false); return; }
+                const q = query.toLowerCase();
+                const { leaders, members } = allData.current;
+                const results = [];
+                leaders.forEach(l => { if (l.name?.toLowerCase().includes(q)) results.push({ ...l, type: 'leader' }); });
+                members.forEach(m => { if (m.name?.toLowerCase().includes(q)) results.push({ ...m, type: 'member', leaderName: leaders.find(l => l.id === m.leader_id)?.name || '미배정' }); });
+                setSearchResults(results.slice(0, 10));
+                setShowResults(true);
+            };
+
+            // 검색 결과 클릭 시 해당 위치로 이동
+            const focusOnResult = (result) => {
+                if (!mapInst.current || !result.lat || !result.lng) return;
+                mapInst.current.panTo({ lat: result.lat, lng: result.lng });
+                mapInst.current.setZoom(15);
+                setShowResults(false);
+                setSearchQuery('');
+                // 해당 마커 찾아서 하이라이트
+                const marker = markers.current.find(mk => mk.memberData?.id === result.id || mk.leaderData?.id === result.id);
+                if (marker) {
+                    marker.setAnimation(window.google.maps.Animation.BOUNCE);
+                    setTimeout(() => marker.setAnimation(null), 2000);
+                }
+                // 리더인 경우 해당 그룹 순원도 하이라이트
+                if (result.type === 'leader') {
+                    const groupMembers = leaderMemberGroupMarkers.current[result.id] || [];
+                    groupMembers.forEach(memberMk => {
+                        memberMk.setIcon({ path: window.google.maps.SymbolPath.CIRCLE, fillColor: HIGHLIGHT_COLOR, fillOpacity: 1, strokeColor: '#f59e0b', strokeWeight: 3, scale: 10 });
+                        memberMk.setZIndex(150);
+                    });
+                    // 연결선 그리기
+                    groupMembers.forEach(memberMk => {
+                        const line = new window.google.maps.Polyline({
+                            path: [{ lat: result.lat, lng: result.lng }, memberMk.getPosition()],
+                            geodesic: true, strokeColor: HIGHLIGHT_COLOR, strokeOpacity: 0.8, strokeWeight: 2, map: mapInst.current
+                        });
+                        polylines.current.push(line);
+                    });
+                    // 3초 후 원래대로
+                    setTimeout(() => {
+                        groupMembers.forEach(memberMk => { memberMk.setIcon(memberMk.originalIcon); memberMk.setZIndex(50); });
+                        polylines.current.forEach(p => p.setMap(null)); polylines.current = [];
+                    }, 3000);
+                }
+            };
+
+            // 리더 선택 시 순원 목록 표시
+            const selectLeaderOnMap = async (leader) => {
+                setSelectedLeader(leader);
+                const members = allData.current.members.filter(m => String(m.leader_id) === String(leader.id));
+                setLeaderMembers(members);
+                // 지도에서 해당 그룹 하이라이트
+                if (mapInst.current) {
+                    polylines.current.forEach(p => p.setMap(null)); polylines.current = [];
+                    markers.current.forEach(mk => { if (mk.originalIcon) mk.setIcon(mk.originalIcon); mk.setZIndex(mk.leaderData ? 100 : 50); });
+                    const groupMembers = leaderMemberGroupMarkers.current[leader.id] || [];
+                    groupMembers.forEach(memberMk => {
+                        memberMk.setIcon({ path: window.google.maps.SymbolPath.CIRCLE, fillColor: HIGHLIGHT_COLOR, fillOpacity: 1, strokeColor: '#f59e0b', strokeWeight: 3, scale: 10 });
+                        memberMk.setZIndex(150);
+                    });
+                    groupMembers.forEach(memberMk => {
+                        const line = new window.google.maps.Polyline({
+                            path: [{ lat: leader.lat, lng: leader.lng }, memberMk.getPosition()],
+                            geodesic: true, strokeColor: HIGHLIGHT_COLOR, strokeOpacity: 0.8, strokeWeight: 2, map: mapInst.current
+                        });
+                        polylines.current.push(line);
+                    });
+                }
+            };
+
+            const closeLeaderPanel = () => {
+                setSelectedLeader(null);
+                setLeaderMembers([]);
+                polylines.current.forEach(p => p.setMap(null)); polylines.current = [];
+                markers.current.forEach(mk => { if (mk.originalIcon) mk.setIcon(mk.originalIcon); mk.setZIndex(mk.leaderData ? 100 : 50); });
+            };
+
+            // 소속 명단 인쇄 함수
+            const printMemberList = () => {
+                if (!selectedLeader || leaderMembers.length === 0) {
+                    alert('인쇄할 명단이 없습니다.');
+                    return;
+                }
+
+                const today = new Date().toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' });
+
+                const printContent = `
+                    <div id="print-area" class="print-container">
+                        <div class="print-header">
+                            <div class="print-title">📋 ${selectedLeader.name} ${formatRole(selectedLeader.role) || ''} 소그룹 명단</div>
+                            <div class="print-subtitle">${selectedLeader.address || ''} · 정원 ${selectedLeader.current_members}/${selectedLeader.max_capacity}명 · ${today}</div>
+                        </div>
+                        <table class="print-table">
+                            <thead>
+                                <tr>
+                                    <th style="width:8%">번호</th>
+                                    <th style="width:15%">이름</th>
+                                    <th style="width:12%">직분</th>
+                                    <th style="width:10%">나이</th>
+                                    <th style="width:15%">연락처</th>
+                                    <th style="width:40%">주소</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${leaderMembers.map((m, i) => `
+                                    <tr>
+                                        <td style="text-align:center">${i + 1}</td>
+                                        <td><b>${m.name || ''}</b></td>
+                                        <td>${formatRole(m.role) || ''}</td>
+                                        <td style="text-align:center">${calcAge(m.birthdate)}세</td>
+                                        <td>${m.contact || '-'}</td>
+                                        <td style="font-size:12px">${m.address || ''}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                        <div class="print-footer">
+                            소그룹 편성 매니저 · 출력일: ${today}
+                        </div>
+                    </div>
+                `;
+
+                // 인쇄 창 생성
+                const printWindow = window.open('', '_blank', 'width=800,height=600');
+                printWindow.document.write(`
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <title>${selectedLeader.name} 소그룹 명단</title>
+                        <style>
+                            * { margin: 0; padding: 0; box-sizing: border-box; }
+                            body { font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, sans-serif; }
+                            .print-container { max-width: 210mm; margin: 0 auto; padding: 15mm; background: white; }
+                            .print-header { border-bottom: 2px solid #1e40af; padding-bottom: 12px; margin-bottom: 20px; }
+                            .print-title { font-size: 24px; font-weight: bold; color: #1e40af; }
+                            .print-subtitle { font-size: 14px; color: #64748b; margin-top: 4px; }
+                            .print-table { width: 100%; border-collapse: collapse; }
+                            .print-table th { background: #f1f5f9; padding: 10px 8px; text-align: left; font-size: 12px; font-weight: bold; border-bottom: 2px solid #e2e8f0; }
+                            .print-table td { padding: 10px 8px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }
+                            .print-table tr:nth-child(even) { background: #f8fafc; }
+                            .print-footer { margin-top: 30px; text-align: center; font-size: 11px; color: #94a3b8; }
+                            @media print { @page { size: A4; margin: 10mm; } }
+                        </style>
+                    </head>
+                    <body>${printContent}</body>
+                    </html>
+                `);
+                printWindow.document.close();
+                printWindow.focus();
+                setTimeout(() => { printWindow.print(); }, 300);
+            };
+
+            const openEditMember = (member) => { setEditItem(member); setEditType('member'); };
+            const openEditLeader = () => { if (selectedLeader) { setEditItem(selectedLeader); setEditType('leader'); } };
+
+            const handleDelete = async (member) => {
+                if (!confirm(`${member.name}님을 삭제하시겠습니까?`)) return;
+                await removeMember(member.id, selectedLeader?.id, 'DELETE');
+                await load();
+            };
+
+            const handleUnassign = async (member) => {
+                if (!confirm(`${member.name}님을 그룹에서 제외하시겠습니까?`)) return;
+                await removeMember(member.id, selectedLeader?.id, 'UNASSIGN');
+                await load();
+            };
+
+            const onEditUpdate = async () => {
+                await load();
+            };
+
+            const initMap = (leaders, members) => {
+                if (!mapRef.current || !window.google) return;
+                if (!mapInst.current) mapInst.current = new window.google.maps.Map(mapRef.current, { center: { lat: 36.5, lng: 127.8 }, zoom: 7, disableDefaultUI: true, zoomControl: true, styles: MAP_STYLES });
+                markers.current.forEach(m => m.setMap(null)); markers.current = [];
+                polylines.current.forEach(p => p.setMap(null)); polylines.current = [];
+                memberMarkersMap.current = {}; // Reset member ID to marker map
+                leaderMemberGroupMarkers.current = {}; // Reset leader ID to member markers array map
+                const bounds = new window.google.maps.LatLngBounds();
+
+                let missingLocationCount = 0;
+
+                members.forEach(m => {
+                    const un = !m.leader_id || String(m.leader_id) === '0' || String(m.leader_id) === '';
+
+                    if (m.lat && m.lng) {
+                        const leaderName = un ? '미배정' : (leaders.find(l => l.id === m.leader_id)?.name || '알수없음');
+                        const memberColor = un ? MEMBER_UNASSIGNED_COLOR : MEMBER_DEFAULT_COLOR;
+                        const mk = new window.google.maps.Marker({
+                            position: { lat: m.lat, lng: m.lng },
+                            map: mapInst.current,
+                            icon: { path: window.google.maps.SymbolPath.CIRCLE, fillColor: memberColor, fillOpacity: 0.9, strokeColor: '#fff', strokeWeight: 2, scale: un ? 8 : 7 },
+                            zIndex: 50
+                        });
+                        mk.originalIcon = { path: window.google.maps.SymbolPath.CIRCLE, fillColor: memberColor, fillOpacity: 0.9, strokeColor: '#fff', strokeWeight: 2, scale: un ? 8 : 7 };
+                        mk.memberData = m;
+                        const info = new window.google.maps.InfoWindow({ content: `<div style="padding:8px;font-family:sans-serif;min-width:150px"><div style="font-size:13px;font-weight:bold;color:#334155">${m.name}</div><div style="font-size:11px;color:#64748b">${m.role} · ${calcAge(m.birthdate)}세</div><div style="font-size:10px;color:#94a3b8;margin-top:4px">${m.address}</div><div style="margin-top:6px;font-size:11px;padding:3px 6px;border-radius:4px;display:inline-block;${un ? 'background:#fee2e2;color:#dc2626' : 'background:#ccfbf1;color:#0d9488'}">배정: ${leaderName}</div>${un ? '<div style="margin-top:4px;font-size:10px;color:#f59e0b">👆 클릭하여 추천리더 보기</div>' : ''}</div>` });
+                        mk.addListener('mouseover', () => info.open(mapInst.current, mk));
+                        mk.addListener('mouseout', () => info.close());
+                        // 멤버 클릭 핸들러
+                        mk.addListener('click', () => {
+                            if (m.leader_id) {
+                                const leader = leaders.find(l => l.id === m.leader_id);
+                                if (leader) selectLeaderOnMap(leader);
+                            } else {
+                                // 미배정: 추천 리더 표시
+                                const recommended = findClosest(m.lat, m.lng, m.birthdate, leaders, 5);
+                                polylines.current.forEach(p => p.setMap(null)); polylines.current = [];
+                                markers.current.forEach(mk => { if (mk.originalIcon) mk.setIcon(mk.originalIcon); mk.setZIndex(mk.leaderData ? 100 : 50); });
+
+                                recommended.forEach(rec => {
+                                    const leaderMk = markers.current.find(k => k.leaderData?.id === rec.id);
+                                    if (leaderMk) {
+                                        const line = new window.google.maps.Polyline({
+                                            path: [{ lat: m.lat, lng: m.lng }, { lat: rec.lat, lng: rec.lng }],
+                                            geodesic: true, strokeColor: '#f59e0b', strokeOpacity: 0.8, strokeWeight: 2, map: mapInst.current,
+                                            icons: [{ icon: { path: window.google.maps.SymbolPath.FORWARD_CLOSED_ARROW }, offset: '100%' }]
+                                        });
+                                        polylines.current.push(line);
+                                        leaderMk.setIcon({ path: window.google.maps.SymbolPath.CIRCLE, fillColor: '#f59e0b', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 3, scale: 16 });
+                                        leaderMk.setZIndex(200);
+                                    }
+                                });
+                                // 자기 자신 하이라이트
+                                mk.setIcon({ path: window.google.maps.SymbolPath.CIRCLE, fillColor: '#ef4444', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 4, scale: 10 });
+                                mk.setZIndex(201);
+                            }
+                        });
+                        markers.current.push(mk);
+                        mk.leaderData = null; // 멤버 마커임
+                        memberMarkersMap.current[m.id] = mk; // Map member ID to its marker
+                        if (m.leader_id) {
+                            if (!leaderMemberGroupMarkers.current[m.leader_id]) leaderMemberGroupMarkers.current[m.leader_id] = [];
+                            leaderMemberGroupMarkers.current[m.leader_id].push(mk);
+                        }
+                        bounds.extend({ lat: m.lat, lng: m.lng });
+                    } else if (m.address) {
+                        missingLocationCount++;
+                    }
+                });
+                setUnmappedCount(missingLocationCount);
+
+                // 리더 마커 생성 (마우스 오버 시 소속원 하이라이트)
+                leaders.forEach(l => {
+                    if (l.lat && l.lng) {
+                        const full = l.current_members >= l.max_capacity;
+                        const mk = new window.google.maps.Marker({
+                            position: { lat: l.lat, lng: l.lng },
+                            map: mapInst.current,
+                            icon: { path: window.google.maps.SymbolPath.CIRCLE, fillColor: full ? '#94a3b8' : '#3b82f6', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 3, scale: 14 },
+                            label: { text: String(l.current_members), color: '#fff', fontSize: '11px', fontWeight: 'bold' },
+                            zIndex: 100
+                        });
+                        mk.leaderData = l;
+                        const info = new window.google.maps.InfoWindow({ content: `<div style="padding:10px;font-family:sans-serif;min-width:180px"><div style="font-size:15px;font-weight:bold;color:#1e40af;margin-bottom:4px">👤 ${l.name} ${l.role}</div><div style="font-size:12px;color:#64748b">${calcAge(l.birthdate)}세 · ${l.gender === 'Male' ? '남성' : '여성'}</div><div style="font-size:11px;color:#94a3b8;margin:6px 0;padding-top:6px;border-top:1px solid #e2e8f0">${l.address}</div><div style="font-size:12px;padding:4px 8px;border-radius:4px;display:inline-block;${full ? 'background:#fee2e2;color:#dc2626' : 'background:#dcfce7;color:#16a34a'};font-weight:600">정원: ${l.current_members}/${l.max_capacity}명</div><div style="margin-top:6px;font-size:11px;color:#6366f1">📌 클릭하여 명단 보기</div></div>` });
+
+                        // Hover: InfoWindow만 표시 (깜빡임 방지)
+                        mk.addListener('mouseover', () => info.open(mapInst.current, mk));
+                        mk.addListener('mouseout', () => info.close());
+
+                        // Click: 전체 효과 (하이라이트 + 연결선 + 패널)
+                        mk.addListener('click', () => selectLeaderOnMap(l));
+
+                        markers.current.push(mk);
+                        bounds.extend({ lat: l.lat, lng: l.lng });
+                    }
+                });
+
+                if (leaders.length || members.length) { mapInst.current.fitBounds(bounds); window.google.maps.event.addListenerOnce(mapInst.current, 'idle', () => { if (mapInst.current.getZoom() > 14) mapInst.current.setZoom(14) }); }
+            };
+
+
+            const maxA = Math.max(...Object.values(stats.ageGroups), 1);
+
+            return (<div className="space-y-6 pb-8">
+                {/* 통합 통계 바 */}
+                <div className="bg-white rounded-2xl border p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-4">
+                        <div className="flex items-center gap-8">
+                            <div className="text-center">
+                                <p className="text-xs text-slate-500">배정</p>
+                                <p className="text-2xl font-black">{stats.memberCount}</p>
+                            </div>
+                            <div className="text-center">
+                                <p className={`text-xs ${stats.unassignedCount > 0 ? 'text-red-500' : 'text-slate-500'}`}>미배정</p>
+                                <p className={`text-2xl font-black ${stats.unassignedCount > 0 ? 'text-red-600' : ''}`}>{stats.unassignedCount}</p>
+                            </div>
+                            <div className="text-center">
+                                <p className="text-xs text-slate-500">리더</p>
+                                <p className="text-2xl font-black">{stats.leaderCount}</p>
+                            </div>
+
+                        </div>
+                        <div className="h-8 w-px bg-slate-200 hidden md:block" />
+                        <div className="flex items-center gap-6">
+                            <div className="flex items-center gap-2">
+                                <div className="relative w-10 h-10">
+                                    <svg viewBox="0 0 36 36" className="w-full h-full -rotate-90">
+                                        <circle cx="18" cy="18" r="15" fill="none" stroke="#e2e8f0" strokeWidth="4" />
+                                        <circle cx="18" cy="18" r="15" fill="none" stroke="#3b82f6" strokeWidth="4" strokeDasharray={`${stats.genderRatio.male / (stats.genderRatio.male + stats.genderRatio.female || 1) * 94} 94`} strokeLinecap="round" />
+                                        <circle cx="18" cy="18" r="15" fill="none" stroke="#ec4899" strokeWidth="4" strokeDasharray={`${stats.genderRatio.female / (stats.genderRatio.male + stats.genderRatio.female || 1) * 94} 94`} strokeDashoffset={`-${stats.genderRatio.male / (stats.genderRatio.male + stats.genderRatio.female || 1) * 94}`} strokeLinecap="round" />
+                                    </svg>
+                                </div>
+                                <div className="text-xs">
+                                    <div className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500"></span>남 {stats.genderRatio.male}명</div>
+                                    <div className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-pink-500"></span>여 {stats.genderRatio.female}명</div>
+                                </div>
+                            </div>
+                            <div className="text-xs space-y-0.5">
+                                {Object.entries(stats.ageGroups).map(([k, v]) => <div key={k} className="flex items-center gap-2"><span className="w-10 text-slate-500">{k}</span><div className="w-16 bg-slate-100 rounded-full h-1.5"><div className="h-full bg-brand-500 rounded-full" style={{ width: `${v / maxA * 100}%` }} /></div><span className="w-8 text-right font-bold">{v}</span></div>)}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {/* 동별 인원 현황 */}
+                {Object.keys(dongStats).length > 0 && (
+                    <div className="bg-white rounded-2xl border p-4">
+                        <div className="flex items-center justify-between mb-3">
+                            <h3 className="font-bold text-slate-700 flex items-center gap-2">📍 동별 인원 현황</h3>
+                            <span className="text-xs text-slate-400">{Object.keys(dongStats).length}개 지역</span>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                            {Object.entries(dongStats)
+                                .sort((a, b) => b[1] - a[1])
+                                .map(([dong, count]) => (
+                                    <div key={dong} className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5">
+                                        <span className="text-sm font-medium text-slate-700">{dong}</span>
+                                        <span className="text-xs font-bold bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded">{count}</span>
+                                    </div>
+                                ))
+                            }
+                        </div>
+                    </div>
+                )}
+                {/* 지도 (전체 너비) */}
+                <div className="bg-white rounded-2xl border overflow-hidden flex flex-col h-[550px]">
+                    <div className="px-5 py-3 border-b bg-slate-50 flex justify-between items-center gap-4">
+                        <div className="flex items-center gap-4">
+                            <b>지도</b>
+                            <div className="flex items-center gap-3 text-xs text-slate-500">
+                                {geocodeProgress ? (
+                                    <span className="flex items-center gap-2 bg-blue-50 text-blue-600 px-2 py-1 rounded font-bold animate-pulse">
+                                        ⏳ 위치 갱신 중... ({geocodeProgress.current}/{geocodeProgress.total})
+                                    </span>
+                                ) : (
+                                    <>
+                                        {unmappedCount > 0 && (
+                                            <button
+                                                onClick={fixMissingLocations}
+                                                className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-[10px] font-bold hover:bg-amber-200 transition-colors flex items-center gap-1"
+                                                title="주소는 있으나 지도에 표시되지 않는 인원의 위치를 찾습니다"
+                                            >
+                                                ⚠️ {unmappedCount}명 위치정보 갱신
+                                            </button>
+                                        )}
+                                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span>리더</span>
+                                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-teal-500"></span>배정</span>
+                                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-red-500"></span>미배정</span>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <div className="flex-1 max-w-xs relative">
+                                <input
+                                    type="text"
+                                    value={searchQuery}
+                                    onChange={e => handleSearch(e.target.value)}
+                                    onFocus={() => searchResults.length > 0 && setShowResults(true)}
+                                    placeholder="🔍 이름으로 검색..."
+                                    className="w-full text-sm border rounded-lg px-3 py-1.5 bg-white"
+                                />
+                                {showResults && searchResults.length > 0 && (
+                                    <div className="absolute top-full left-0 right-0 mt-1 bg-white border rounded-lg shadow-lg z-50 max-h-64 overflow-auto">
+                                        {searchResults.map((r, i) => (
+                                            <div key={i} onClick={() => focusOnResult(r)} className="px-3 py-2 hover:bg-slate-50 cursor-pointer border-b last:border-b-0">
+                                                <div className="flex items-center gap-2">
+                                                    <span className={`text-xs px-1.5 py-0.5 rounded ${r.type === 'leader' ? 'bg-blue-100 text-blue-700' : r.leader_id ? 'bg-teal-100 text-teal-700' : 'bg-red-100 text-red-700'}`}>{r.type === 'leader' ? '리더' : r.leader_id ? '배정' : '미배정'}</span>
+                                                    <b className="text-sm">{r.name}</b>
+                                                    <span className="text-xs text-slate-500">{r.role} · {calcAge(r.birthdate)}세</span>
+                                                </div>
+                                                {r.type === 'member' && <div className="text-xs text-slate-400 mt-1">소속: {r.leaderName}</div>}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                            <button onClick={load} className="text-xs bg-white border px-3 py-1.5 rounded-lg shrink-0 hover:bg-slate-50">새로고침</button>
+                        </div>
+                    </div>
+                    <div className="flex-1 relative">
+                        {loading && <div className="absolute inset-0 z-20 bg-white/80 flex items-center justify-center"><div className="w-8 h-8 border-4 border-brand-200 border-t-brand-600 rounded-full animate-spin" /></div>}
+                        <div ref={mapRef} className="w-full h-full bg-slate-100" />
+                    </div>
+                </div>
+                {/* 선택된 리더의 순원 목록 - 지도 아래 별도 섹션 */}
+                {selectedLeader && (
+                    <div className="bg-white rounded-2xl border animate-fade-in-up">
+                        <div className="px-5 py-4 border-b bg-slate-50 flex justify-between items-center">
+                            <div className="flex items-center gap-3">
+                                <div className="w-12 h-12 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center font-bold text-lg">{selectedLeader.current_members}</div>
+                                <div>
+                                    <div className="font-bold text-lg">{selectedLeader.name} <span className="text-sm font-normal text-slate-500">{selectedLeader.role}</span></div>
+                                    <div className="text-sm text-slate-500">{calcAge(selectedLeader.birthdate)}세 · {selectedLeader.address}</div>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <div className="flex bg-slate-100 p-0.5 rounded text-xs">
+                                    <button onClick={() => setMemberSortBy('name')} className={`px-2 py-1 rounded ${memberSortBy === 'name' ? 'bg-white text-brand-600 font-bold' : 'text-slate-500'}`}>이름순</button>
+                                    <button onClick={() => setMemberSortBy('age')} className={`px-2 py-1 rounded ${memberSortBy === 'age' ? 'bg-white text-brand-600 font-bold' : 'text-slate-500'}`}>나이순</button>
+                                </div>
+                                <button onClick={printMemberList} className="text-xs bg-blue-100 text-blue-700 px-3 py-1.5 rounded-lg hover:bg-blue-200">🖨️ 인쇄</button>
+                                <button onClick={openEditLeader} className="text-xs bg-slate-100 px-3 py-1.5 rounded-lg hover:bg-slate-200">✏️ 리더 수정</button>
+                                <button onClick={closeLeaderPanel} className="text-slate-400 hover:text-slate-600 text-xl ml-2">✕</button>
+                            </div>
+                        </div>
+                        <div className="p-4">
+                            {leaderMembers.length === 0 ? (
+                                <div className="text-center text-slate-400 py-8">소속된 인원이 없습니다</div>
+                            ) : (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    {[...leaderMembers].sort((a, b) => memberSortBy === 'age' ? calcAge(b.birthdate) - calcAge(a.birthdate) : (a.name || '').localeCompare(b.name || '', 'ko')).map(m => (
+                                        <div key={m.id} className="flex justify-between items-center p-3 bg-slate-50 rounded-xl hover:bg-slate-100">
+                                            <div>
+                                                <b>{genderIcon(m.gender)} {m.name}</b> <span className="text-xs text-slate-500">{formatRole(m.role)} · {calcAge(m.birthdate)}세 ({formatBirthdate(m.birthdate)})</span>
+                                                {m.contact && <span className="text-xs text-slate-400 ml-2">📞 {m.contact}</span>}
+                                                <div className="text-xs text-slate-400 mt-0.5">{m.address}</div>
+                                            </div>
+                                            <div className="flex gap-2 shrink-0">
+                                                <button onClick={() => openEditMember(m)} className="text-xs bg-white border px-2 py-1 rounded hover:bg-slate-50">✏️ 수정</button>
+                                                <button onClick={() => handleUnassign(m)} className="text-xs text-amber-600 hover:text-amber-800 px-2">제외</button>
+                                                <button onClick={() => handleDelete(m)} className="text-xs text-red-600 hover:text-red-800 px-2">삭제</button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
+                {editItem && <EditModal item={editItem} type={editType} leaders={allData.current.leaders} onClose={() => { setEditItem(null); setEditType(null); }} onUpdate={onEditUpdate} />}
+            </div>)
+        };
+
+        const OrgChart = ({ globalData, onRefresh, setGlobalData, setSyncing }) => {
+            const { leaders, members } = globalData;
+
+            // 다중 선택 상태 (터치/클릭 기반) - { id, fromLeaderId, member }
+            const [selectedMembers, setSelectedMembers] = useState([]);
+            // 추천 리더 ID 목록 (마지막 선택된 멤버 기준)
+            const [recommendedLeaders, setRecommendedLeaders] = useState([]);
+
+            // Context Menu State
+            const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, member: null, leaderId: null });
+            // Edit Modal State
+            const [editModal, setEditModal] = useState({ visible: false, member: null });
+            // Edit Form State
+            const [editForm, setEditForm] = useState({ name: '', role: '', birthdate: '', gender: '', address: '' });
+
+            // 리더별로 그룹핑 (순원 수 적은 순)
+            const sortedLeaders = [...leaders].sort((a, b) => (a.current_members || 0) - (b.current_members || 0));
+            const groups = sortedLeaders.map(l => ({
+                leader: l,
+                members: members.filter(m => String(m.leader_id) === String(l.id)).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ko'))
+            }));
+            const unassigned = members.filter(m => !m.leader_id).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ko'));
+
+            // 순원 선택 핸들러 (다중 선택 토글)
+            const handleSelectMember = (member, fromLeaderId) => {
+                const isSelected = selectedMembers.some(s => s.id === member.id);
+
+                if (isSelected) {
+                    // 선택 해제
+                    const newSet = selectedMembers.filter(s => s.id !== member.id);
+                    setSelectedMembers(newSet);
+                    if (newSet.length === 0) setRecommendedLeaders([]);
+                } else {
+                    // 추가 선택
+                    const newItem = { id: member.id, fromLeaderId, member };
+                    const newSet = [...selectedMembers, newItem];
+                    setSelectedMembers(newSet);
+
+                    // 추천 리더 계산 (마지막 선택된 멤버 기준)
+                    if (member.lat && member.lng) {
+                        const recommended = findClosest(member.lat, member.lng, member.birthdate, leaders, 3);
+                        setRecommendedLeaders(recommended.map(r => r.id));
+                    } else {
+                        setRecommendedLeaders([]);
+                    }
+                }
+            };
+
+            // Context Menu Handlers
+            const handleContextMenu = (e, member, leaderId) => {
+                e.preventDefault();
+                setContextMenu({
+                    visible: true,
+                    x: e.pageX,
+                    y: e.pageY,
+                    member,
+                    leaderId
+                });
+            };
+
+            const closeContextMenu = () => setContextMenu({ ...contextMenu, visible: false });
+
+            useEffect(() => {
+                const handleClick = () => closeContextMenu();
+                document.addEventListener('click', handleClick);
+                return () => document.removeEventListener('click', handleClick);
+            }, [contextMenu]);
+
+            const handleEditClick = () => {
+                if (contextMenu.member) {
+                    setEditForm({
+                        name: contextMenu.member.name,
+                        role: contextMenu.member.role,
+                        birthdate: contextMenu.member.birthdate,
+                        gender: contextMenu.member.gender,
+                        address: contextMenu.member.address || ''
+                    });
+                    setEditModal({ visible: true, member: contextMenu.member });
+                }
+            };
+
+            const handleDeleteClick = async () => {
+                if (!contextMenu.member) return;
+                const { member, leaderId } = contextMenu;
+                if (!confirm(`${member.name}님을 삭제(미배정/삭제) 하시겠습니까?\n\n- 확인: 미배정 상태로 변경 (그룹에서 제외)\n- 취소: 작업 취소`)) return;
+
+                // Optimistic Update
+                const backup = { ...globalData };
+
+                // Unassign (remove leader_id)
+                const newMembers = members.map(m => m.id === member.id ? { ...m, leader_id: '' } : m);
+
+                // Recalculate leader count
+                const leaderCounts = {};
+                newMembers.forEach(m => {
+                    if (m.leader_id) leaderCounts[m.leader_id] = (leaderCounts[m.leader_id] || 0) + 1;
+                });
+
+                const newLeaders = leaders.map(l => ({
+                    ...l,
+                    current_members: leaderCounts[l.id] || 0
+                }));
+
+                setGlobalData({ ...globalData, members: newMembers, leaders: newLeaders });
+                setSyncing?.(true);
+
+                try {
+                    await updateMember(member.id, { leader_id: '' });
+                } catch (err) {
+                    alert("삭제 실패: " + err.message);
+                    setGlobalData(backup);
+                } finally {
+                    setSyncing?.(false);
+                }
+            };
+
+            const handleDeletePermanently = async () => {
+                if (!editModal.member) return;
+                const { member } = editModal;
+                if (!confirm(`정말로 ${member.name}님을 데이터베이스에서 영구 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.`)) return;
+
+                // Optimistic Update
+                const backup = { ...globalData };
+                const newMembers = members.filter(m => m.id !== member.id);
+                // Recalculate leader count
+                const leaderCounts = {};
+                newMembers.forEach(m => {
+                    if (m.leader_id) leaderCounts[m.leader_id] = (leaderCounts[m.leader_id] || 0) + 1;
+                });
+                const newLeaders = leaders.map(l => ({
+                    ...l,
+                    current_members: leaderCounts[l.id] || 0
+                }));
+
+                setGlobalData({ ...globalData, members: newMembers, leaders: newLeaders });
+                setEditModal({ visible: false, member: null });
+                setSyncing?.(true);
+
+                try {
+                    await removeMember(member.id, member.leader_id, 'DELETE');
+                } catch (err) {
+                    alert("영구 삭제 실패: " + err.message);
+                    setGlobalData(backup);
+                } finally {
+                    setSyncing?.(false);
+                }
+            };
+
+            const handleSaveEdit = async (e) => {
+                e.preventDefault();
+                if (!editModal.member) return;
+
+                const backup = { ...globalData };
+                const updatedMember = { ...editModal.member, ...editForm };
+
+                const newMembers = members.map(m => m.id === updatedMember.id ? updatedMember : m);
+                setGlobalData({ ...globalData, members: newMembers });
+                setEditModal({ visible: false, member: null });
+                setSyncing?.(true);
+
+                try {
+                    await updateMember(updatedMember.id, editForm);
+                } catch (err) {
+                    alert("수정 실패: " + err.message);
+                    setGlobalData(backup);
+                } finally {
+                    setSyncing?.(false);
+                }
+            };
+
+            // 그룹 클릭 핸들러 (선택된 멤버들을 이 그룹으로 모두 이동)
+            const handleGroupClick = async (toLeaderId) => {
+                // 선택된 멤버가 없으면 무시
+                if (selectedMembers.length === 0) return;
+
+                const leaderName = leaders.find(l => String(l.id) === String(toLeaderId))?.name || "미배정";
+                const count = selectedMembers.length;
+                const names = selectedMembers.map(s => s.member.name).join(', ');
+                const displayName = count > 3 ? `${selectedMembers[0].member.name} 외 ${count - 1}명` : names;
+
+                if (!confirm(`${displayName}을(를) [${leaderName}]으로 이동하시겠습니까?`)) return;
+
+                // Optimistic Update
+                const backup = { ...globalData };
+
+                // 멤버 업데이트
+                const targetIds = selectedMembers.map(s => String(s.id));
+                const newMembers = members.map(m => targetIds.includes(String(m.id)) ? { ...m, leader_id: toLeaderId || '' } : m);
+
+                // 리더 카운트 업데이트
+                // leaders array를 순회하며, 각 leader의 current_members를 재계산하는 것이 안전함.
+                // 하지만 성능상 delta만 반영하려면 복잡함 (N명이 서로 다른 그룹에서 왔을 수 있음).
+                // 간단히 newMembers 기반으로 leader counts를 재계산하는게 가장 정확함.
+                const leaderCounts = {};
+                newMembers.forEach(m => {
+                    if (m.leader_id) leaderCounts[m.leader_id] = (leaderCounts[m.leader_id] || 0) + 1;
+                });
+
+                const newLeaders = leaders.map(l => ({
+                    ...l,
+                    current_members: leaderCounts[l.id] || 0
+                }));
+
+                setGlobalData({ ...globalData, members: newMembers, leaders: newLeaders });
+                setSelectedMembers([]);
+                setRecommendedLeaders([]);
+
+                setSyncing?.(true);
+                try {
+                    // 병렬 업데이트
+                    await Promise.all(selectedMembers.map(s => updateMember(s.id, { leader_id: toLeaderId || '' })));
+                } catch (err) {
+                    console.error("이동 실패", err);
+                    alert("이동 실패: " + err.message);
+                    setGlobalData(backup);
+                } finally {
+                    setSyncing?.(false);
+                }
+            };
+
+            // 추천 순위 뱃지
+            const getRecommendRank = (leaderId) => {
+                const idx = recommendedLeaders.indexOf(leaderId);
+                return idx >= 0 ? idx + 1 : null;
+            };
+
+            // 엑셀 다운로드 (A3 레이아웃 고려)
+            const exportExcel = () => {
+                const wb = XLSX.utils.book_new();
+                const wsData = [];
+                const GROUPS_PER_ROW = 5;
+
+                // 전체 그룹 리스트 (미배정도 그룹처럼 취급)
+                const allGroups = [...groups];
+                if (unassigned.length > 0) {
+                    allGroups.push({
+                        leader: { name: '미배정', role: '', isUnassigned: true },
+                        members: unassigned
+                    });
+                }
+
+                for (let i = 0; i < allGroups.length; i += GROUPS_PER_ROW) {
+                    const rowGroups = allGroups.slice(i, i + GROUPS_PER_ROW);
+                    const headerRow = [];
+                    rowGroups.forEach(g => {
+                        headerRow.push(g.leader.isUnassigned ? "미배정" : `${g.leader.name} ${formatRole(g.leader.role)}`);
+                        headerRow.push(""); headerRow.push("");
+                    });
+                    wsData.push(headerRow);
+
+                    const maxLen = Math.max(...rowGroups.map(g => g.members.length));
+                    for (let j = 0; j < maxLen; j++) {
+                        const memberRow = [];
+                        rowGroups.forEach(g => {
+                            const m = g.members[j];
+                            if (m) {
+                                memberRow.push(m.name); memberRow.push(formatRole(m.role));
+                            } else {
+                                memberRow.push(""); memberRow.push("");
+                            }
+                            memberRow.push("");
+                        });
+                        wsData.push(memberRow);
+                    }
+                    const footerRow = [];
+                    rowGroups.forEach(g => {
+                        footerRow.push(`총 ${g.members.length}명`);
+                        footerRow.push(""); footerRow.push("");
+                    });
+                    wsData.push(footerRow);
+                    wsData.push([]); wsData.push([]);
+                }
+
+                const ws = XLSX.utils.aoa_to_sheet(wsData);
+                const wscols = [];
+                for (let k = 0; k < GROUPS_PER_ROW; k++) {
+                    wscols.push({ wch: 10 }); wscols.push({ wch: 8 }); wscols.push({ wch: 2 });
+                }
+                ws['!cols'] = wscols;
+                XLSX.utils.book_append_sheet(wb, ws, "조직도");
+                XLSX.writeFile(wb, `조직도_${new Date().toISOString().slice(0, 10)}.xlsx`);
+            };
+
+            return (
+                <div className="space-y-6 pb-12">
+                    <div className="flex justify-between items-center bg-white p-4 rounded-2xl border shadow-sm print:hidden">
+                        <h2 className="text-xl font-bold flex items-center gap-2">
+                            <span>📊</span> 조직도 (터치하여 이동)
+                        </h2>
+                        <button onClick={exportExcel} className="bg-green-600 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-green-700 flex items-center gap-2 transition-colors shadow-sm">
+                            <span>📅</span> 엑셀 다운로드
+                        </button>
+                    </div>
+
+                    {/* 선택 상태 안내 배너 */}
+                    {/* 선택 상태 안내 배너 (다중 선택 지원) */}
+                    {selectedMembers.length > 0 && (
+                        <div className="bg-blue-500 text-white p-3 rounded-xl flex justify-between items-center shadow-lg animate-pulse">
+                            <div className="flex items-center gap-2">
+                                <span className="text-lg">👆</span>
+                                <span className="font-bold">
+                                    {selectedMembers.length}명 선택됨
+                                    {selectedMembers.length === 1 && <span className="text-sm font-normal ml-1">({selectedMembers[0].member.name})</span>}
+                                </span>
+                                <span className="text-blue-100 hidden sm:inline"> - 이동할 그룹을 터치하세요</span>
+                                {recommendedLeaders.length > 0 && (
+                                    <span className="bg-amber-400 text-amber-900 px-2 py-0.5 rounded-full text-xs font-bold ml-2">
+                                        🌟 추천 그룹
+                                    </span>
+                                )}
+                                {selectedMembers.length > 0 && recommendedLeaders.length === 0 && (!selectedMembers[selectedMembers.length - 1].member.lat || !selectedMembers[selectedMembers.length - 1].member.lng) && (
+                                    <span className="bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full text-xs font-bold ml-2">
+                                        ⚠️ 위치 정보 없음
+                                    </span>
+                                )}
+                            </div>
+                            <button
+                                onClick={() => { setSelectedMembers([]); setRecommendedLeaders([]); }}
+                                className="bg-white/20 hover:bg-white/30 px-3 py-1 rounded-lg text-sm font-medium transition-colors"
+                            >
+                                ✕ 취소
+                            </button>
+                        </div>
+                    )}
+
+                    <div className="flex flex-col lg:flex-row gap-6">
+                        {/* Main Grid */}
+                        <div className="flex-1">
+                            <div id="org-chart-container" className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 print:block">
+                                <style>{`
+                                    @media print {
+                                        @page { size: A3 landscape; margin: 10mm; }
+                                        body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+                                        #org-chart-container {
+                                            display: grid;
+                                            grid-template-columns: repeat(5, 1fr) !important;
+                                            gap: 10px !important;
+                                            width: 100%;
+                                        }
+                                        .org-card {
+                                            break-inside: avoid;
+                                            page-break-inside: avoid;
+                                            border: 1px solid #cbd5e1 !important;
+                                            box-shadow: none !important;
+                                        }
+                                        .no-print { display: none !important; }
+                                    }
+                                `}</style>
+
+                                {groups.map(({ leader, members }) => {
+                                    const recommendRank = getRecommendRank(leader.id);
+                                    const isRecommended = recommendRank !== null;
+                                    return (
+                                        <div
+                                            key={leader.id}
+                                            onClick={() => handleGroupClick(leader.id)}
+                                            className={`org-card bg-white rounded-lg shadow border overflow-hidden flex flex-col h-full transition-all cursor-pointer select-none
+                                            ${selectedMembers.length > 0 ? 'hover:ring-2 hover:ring-blue-400' : 'hover:shadow-lg'}
+                                            ${isRecommended ? 'ring-2 ring-amber-400 border-amber-300' : 'border-slate-200'}
+                                        `}
+                                        >
+                                            <div className={`p-2 text-center border-b print:bg-slate-200 print:text-black print:border-slate-300 relative
+                                            ${isRecommended ? 'bg-amber-500 text-white border-amber-400' : 'bg-slate-700 text-white border-slate-600'}
+                                        `}>
+                                                {isRecommended && (
+                                                    <div className="absolute -top-2 -right-2 w-6 h-6 bg-amber-500 border-2 border-white rounded-full flex items-center justify-center text-white text-xs font-bold shadow">
+                                                        {recommendRank}
+                                                    </div>
+                                                )}
+                                                <div className="text-xs opacity-80 font-light">{formatRole(leader.role)}</div>
+                                                <div className="text-base font-bold truncate">{leader.name} {calcAge(leader.birthdate) > 0 ? `(${calcAge(leader.birthdate)})` : ''}</div>
+                                            </div>
+                                            <div className="p-2 flex-1 bg-white space-y-1 min-h-[100px]">
+                                                {members.length === 0 ? (
+                                                    <div className="text-center text-slate-300 text-xs py-4">배정 인원 없음<br />{selectedMembers.length > 0 ? '👆 터치하여 배정' : '터치 → 이동'}</div>
+                                                ) : (
+                                                    members.map(m => {
+                                                        const isSelected = selectedMembers.some(s => s.id === m.id);
+                                                        return (
+                                                            <div
+                                                                key={m.id}
+                                                                onClick={(e) => { e.stopPropagation(); handleSelectMember(m, leader.id); }}
+                                                                onContextMenu={(e) => handleContextMenu(e, m, leader.id)}
+                                                                className={`rounded px-2 py-1.5 text-xs flex justify-between items-center cursor-pointer transition-all select-none
+                                                            ${isSelected
+                                                                        ? 'bg-blue-500 text-white border-2 border-blue-600 ring-2 ring-blue-300 shadow-lg'
+                                                                        : 'bg-slate-50 border border-slate-100 hover:bg-slate-100'}
+                                                        `}
+                                                            >
+                                                                <span className={`font-medium truncate ${isSelected ? 'text-white' : 'text-slate-700'}`}>
+                                                                    {isSelected && '✓ '}{m.name} {calcAge(m.birthdate) > 0 ? `(${calcAge(m.birthdate)})` : ''}
+                                                                </span>
+                                                                <span className={`text-[10px] ${isSelected ? 'text-blue-100' : 'text-slate-400'}`}>{formatRole(m.role)}</span>
+                                                            </div>
+                                                        )
+                                                    })
+                                                )}
+                                            </div>
+                                            <div className="bg-slate-50 p-1.5 text-center text-[10px] text-slate-400 border-t border-slate-100 font-mono">
+                                                Total: {members.length}
+                                            </div>
+                                        </div>
+                                    )
+                                })}
+                            </div>
+                        </div>
+
+                        {/* Unassigned Sidebar */}
+                        <div className="w-full lg:w-64 shrink-0 print:hidden">
+                            <div
+                                className={`bg-white rounded-xl border shadow-sm sticky top-24 max-h-[calc(100vh-8rem)] flex flex-col cursor-pointer transition-all select-none
+                                    ${selectedMembers.length > 0 ? 'border-blue-300 ring-2 ring-blue-200' : 'border-red-200'}
+                                `}
+                                onClick={() => handleGroupClick('')}
+                            >
+                                <div className="bg-red-50 text-red-700 p-3 text-center border-b border-red-100 rounded-t-xl">
+                                    <div className="font-bold">미배정 인원</div>
+                                    <div className="text-xs mt-1 bg-white/50 inline-block px-2 py-0.5 rounded-full">{unassigned.length}명</div>
+                                    {selectedMembers.length > 0 && <div className="text-xs mt-1 text-blue-600 font-medium">👆 터치하여 배정 취소</div>}
+                                </div>
+                                <div className="p-2 overflow-y-auto flex-1 bg-red-50/10 space-y-1 min-h-[150px]">
+                                    {unassigned.length === 0 ? (
+                                        <div className="text-center text-slate-400 text-sm py-8">
+                                            미배정 인원 없음<br />
+                                            <span className="text-xs text-slate-300">{selectedMembers.length > 0 ? '👆 터치하여 배정 취소' : '인원 선택 후 터치'}</span>
+                                        </div>
+                                    ) : (
+                                        unassigned.map(m => {
+                                            const isSelected = selectedMembers.some(s => s.id === m.id);
+                                            return (
+                                                <div
+                                                    key={m.id}
+                                                    onClick={(e) => { e.stopPropagation(); handleSelectMember(m, null); }}
+                                                    onContextMenu={(e) => handleContextMenu(e, m, null)}
+                                                    className={`rounded px-2 py-2 text-sm flex justify-between items-center cursor-pointer transition-all select-none
+                                                    ${isSelected
+                                                            ? 'bg-blue-500 text-white border-2 border-blue-600 ring-2 ring-blue-300 shadow-lg'
+                                                            : 'bg-white border border-red-100 hover:shadow-sm'}
+                                                `}
+                                                >
+                                                    <span className={`font-medium truncate ${isSelected ? 'text-white' : 'text-red-600'}`}>
+                                                        {isSelected && '✓ '}{m.name} {calcAge(m.birthdate) > 0 ? `(${calcAge(m.birthdate)})` : ''}
+                                                    </span>
+                                                    <span className={`text-xs ${isSelected ? 'text-blue-100' : 'text-slate-400'}`}>{formatRole(m.role)}</span>
+                                                </div>
+                                            )
+                                        })
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Context Menu */}
+                    {contextMenu.visible && (
+                        <div
+                            className="fixed bg-white border border-slate-200 shadow-xl rounded-lg py-1 w-32 z-[100] animate-fade-in"
+                            style={{ top: contextMenu.y, left: contextMenu.x }}
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <button onClick={handleEditClick} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2">
+                                ✏️ 수정
+                            </button>
+                            <button onClick={handleDeleteClick} className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2">
+                                🗑️ 삭제
+                            </button>
+                        </div>
+                    )}
+
+                    {/* Edit Modal */}
+                    {editModal.visible && (
+                        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-[110] animate-fade-in">
+                            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 m-4" onClick={(e) => e.stopPropagation()}>
+                                <h3 className="text-xl font-bold mb-4">정보 수정</h3>
+                                <form onSubmit={handleSaveEdit} className="space-y-4">
+                                    <div>
+                                        <label className="text-xs font-bold text-slate-500 block mb-1">이름</label>
+                                        <input required value={editForm.name} onChange={e => setEditForm({ ...editForm, name: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="text-xs font-bold text-slate-500 block mb-1">직분</label>
+                                            <input value={editForm.role} onChange={e => setEditForm({ ...editForm, role: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs font-bold text-slate-500 block mb-1">성별</label>
+                                            <select value={editForm.gender} onChange={e => setEditForm({ ...editForm, gender: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm">
+                                                <option value="Male">남성</option>
+                                                <option value="Female">여성</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-bold text-slate-500 block mb-1">생년월일</label>
+                                        <input type="date" required value={editForm.birthdate} onChange={e => setEditForm({ ...editForm, birthdate: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-bold text-slate-500 block mb-1">주소</label>
+                                        <input value={editForm.address} onChange={e => setEditForm({ ...editForm, address: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" />
+                                    </div>
+                                    <div className="flex justify-end gap-2 mt-6">
+                                        <button type="button" onClick={() => handleDeletePermanently()} className="mr-auto text-red-500 text-xs font-bold px-3 py-2 hover:bg-red-50 rounded-lg transition-colors">영구 삭제</button>
+                                        <button type="button" onClick={() => setEditModal({ visible: false, member: null })} className="px-4 py-2 text-slate-500 font-bold hover:bg-slate-100 rounded-xl transition-colors">취소</button>
+                                        <button type="submit" className="px-4 py-2 bg-brand-600 text-white font-bold rounded-xl hover:bg-brand-700 transition-colors">저장</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </div >
+            );
+        };
+        const App = () => {
+            const [tab, setTab] = useState('MATCH'), [mapsLoaded, setMapsLoaded] = useState(false), [conn, setConn] = useState(false), [check, setCheck] = useState(true);
+            // 전역 데이터 상태 (한 번만 로드)
+            const [globalData, setGlobalData] = useState({ leaders: [], members: [], loaded: false, loading: false });
+            // 백그라운드 동기화 상태
+            const [syncing, setSyncing] = useState(false);
+            // 로딩 진행 상태
+            const [loadingProgress, setLoadingProgress] = useState({ step: '', progress: 0, details: '' });
+
+            // 동기화 중일 때 페이지 이탈 경고
+            useEffect(() => {
+                const handleBeforeUnload = (e) => {
+                    if (syncing) {
+                        e.preventDefault();
+                        e.returnValue = '';
+                    }
+                };
+                window.addEventListener('beforeunload', handleBeforeUnload);
+                return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+            }, [syncing]);
+
+            const loadGlobalData = async () => {
+                if (globalData.loading) return;
+                setGlobalData(prev => ({ ...prev, loading: true }));
+                setLoadingProgress({ step: '연결 확인 중...', progress: 10, details: 'Google Sheets 연결 중' });
+                try {
+                    // 단계별 로딩으로 진행 상황 표시
+                    setLoadingProgress({ step: '리더 데이터 로딩 중...', progress: 30, details: '소그룹 리더 정보를 불러오는 중입니다' });
+                    const leaders = await request('GET_LEADERS');
+                    setLoadingProgress({ step: '리더 데이터 완료', progress: 50, details: `${leaders.length}명의 리더 로드됨` });
+
+                    await sleep(100); // 진행률 표시를 위한 짧은 딜레이
+
+                    setLoadingProgress({ step: '순원 데이터 로딩 중...', progress: 70, details: '소그룹원 정보를 불러오는 중입니다' });
+                    const members = await request('GET_ALL_MEMBERS');
+                    setLoadingProgress({ step: '데이터 처리 중...', progress: 90, details: `${leaders.length}명 리더, ${members.length}명 순원 로드됨` });
+
+                    await sleep(100);
+
+                    setLoadingProgress({ step: '완료!', progress: 100, details: '데이터 로딩 완료' });
+                    setGlobalData({ leaders, members, loaded: true, loading: false });
+                } catch (err) {
+                    console.error('전역 데이터 로드 실패:', err);
+                    setLoadingProgress({ step: '오류 발생', progress: 0, details: err.message });
+                    setGlobalData(prev => ({ ...prev, loading: false }));
+                }
+            };
+
+            const refreshGlobalData = async () => {
+                setGlobalData(prev => ({ ...prev, loading: true }));
+                try {
+                    const { leaders, members } = await fetchFullData();
+                    setGlobalData({ leaders, members, loaded: true, loading: false });
+                } catch (err) {
+                    console.error('데이터 새로고침 실패:', err);
+                    setGlobalData(prev => ({ ...prev, loading: false }));
+                }
+            };
+
+            const handleTabChange = (newTab) => { setTab(newTab); window.scrollTo(0, 0); };
+
+            useEffect(() => {
+                if (localStorage.getItem(SHEET_API_URL_KEY)) setConn(true);
+                setCheck(false);
+                if (!document.getElementById('gm')) {
+                    const s = document.createElement('script');
+                    s.id = 'gm';
+                    s.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&libraries=places`;
+                    s.async = true;
+                    s.onload = () => setTimeout(() => setMapsLoaded(true), 100);
+                    document.head.appendChild(s);
+                } else if (window.google?.maps) setMapsLoaded(true);
+            }, []);
+
+            // 연결 후 최초 1회 데이터 로드
+            useEffect(() => {
+                if (conn && mapsLoaded && !globalData.loaded && !globalData.loading) {
+                    loadGlobalData();
+                }
+            }, [conn, mapsLoaded, globalData.loaded, globalData.loading]);
+
+            const disconnect = () => { if (confirm("연결 해제?")) { localStorage.removeItem(SHEET_API_URL_KEY); setConn(false); setGlobalData({ leaders: [], members: [], loaded: false, loading: false }); } };
+
+            if (check) return null;
+            if (!conn) return <SetupScreen onComplete={() => setConn(true)} />;
+
+            return (
+                <div className="min-h-screen bg-slate-50 flex flex-col">
+                    <header className="bg-white/80 backdrop-blur-md sticky top-0 z-50 border-b shadow-sm">
+                        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+                            <div className="flex items-center gap-2.5 cursor-pointer" onClick={disconnect}>
+                                <div className="bg-green-600 p-1.5 rounded-lg text-white">📋</div>
+                                <div>
+                                    <b>소그룹 편성</b>
+                                    <p className="text-[10px] text-green-600 flex items-center gap-1">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-green-500" />연결됨
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                {syncing && (
+                                    <div className="flex items-center gap-1.5 text-xs font-semibold text-blue-600 bg-blue-50 px-2.5 py-1 rounded-full animate-pulse">
+                                        <div className="w-2 h-2 rounded-full bg-blue-500 animate-ping" />
+                                        저장 중...
+                                    </div>
+                                )}
+                                <nav className="flex bg-slate-100/80 p-1 rounded-xl">
+                                    <button onClick={() => handleTabChange('MATCH')} className={`px-4 py-1.5 rounded-lg text-sm font-semibold ${tab === 'MATCH' ? 'bg-white text-brand-600' : 'text-slate-500'}`}>배정</button>
+                                    <button onClick={() => handleTabChange('UPLOAD')} className={`px-4 py-1.5 rounded-lg text-sm font-semibold ${tab === 'UPLOAD' ? 'bg-white text-brand-600' : 'text-slate-500'}`}>관리</button>
+                                    <button onClick={() => handleTabChange('DASHBOARD')} className={`px-4 py-1.5 rounded-lg text-sm font-semibold ${tab === 'DASHBOARD' ? 'bg-white text-brand-600' : 'text-slate-500'}`}>현황</button>
+                                    <button onClick={() => handleTabChange('ORG_CHART')} className={`px-4 py-1.5 rounded-lg text-sm font-semibold ${tab === 'ORG_CHART' ? 'bg-white text-brand-600' : 'text-slate-500'}`}>조직도</button>
+                                </nav>
+                            </div>
+                        </div>
+                    </header>
+                    <main className="flex-1 max-w-7xl mx-auto w-full p-6">
+                        {!mapsLoaded ? (
+                            <div className="flex flex-col items-center justify-center h-[60vh] text-slate-400">
+                                <div className="w-12 h-12 border-4 border-brand-100 border-t-brand-600 rounded-full animate-spin mb-4" />
+                                지도 로딩중...
+                            </div>
+                        ) : globalData.loading && !globalData.loaded ? (
+                            <div className="flex flex-col items-center justify-center h-[60vh] text-slate-500">
+                                <div className="bg-white rounded-2xl shadow-lg border p-8 w-full max-w-md">
+                                    {/* 로딩 아이콘 */}
+                                    <div className="flex justify-center mb-6">
+                                        <div className="relative">
+                                            <div className="w-16 h-16 border-4 border-brand-100 border-t-brand-600 rounded-full animate-spin" />
+                                            <div className="absolute inset-0 flex items-center justify-center">
+                                                <span className="text-lg">📊</span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* 진행률 바 */}
+                                    <div className="mb-4">
+                                        <div className="flex justify-between text-xs mb-1">
+                                            <span className="font-semibold text-brand-600">{loadingProgress.step}</span>
+                                            <span className="text-slate-400">{loadingProgress.progress}%</span>
+                                        </div>
+                                        <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                                            <div
+                                                className="h-full bg-gradient-to-r from-brand-500 to-brand-600 rounded-full transition-all duration-300 ease-out"
+                                                style={{ width: `${loadingProgress.progress}%` }}
+                                            />
+                                        </div>
+                                    </div>
+
+                                    {/* 상세 정보 */}
+                                    <p className="text-center text-sm text-slate-400">{loadingProgress.details}</p>
+
+                                    {/* 팁 */}
+                                    <div className="mt-6 pt-4 border-t border-slate-100">
+                                        <p className="text-xs text-center text-slate-300">
+                                            💡 스프레드시트 데이터가 많을수록 시간이 더 소요됩니다
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="animate-fade-in-up">
+                                {tab === 'MATCH' && <MemberMatching globalData={globalData} onRefresh={refreshGlobalData} setGlobalData={setGlobalData} setSyncing={setSyncing} />}
+                                {tab === 'UPLOAD' && <LeaderUpload globalData={globalData} onRefresh={refreshGlobalData} />}
+                                {tab === 'DASHBOARD' && <Dashboard globalData={globalData} onRefresh={refreshGlobalData} setGlobalData={setGlobalData} />}
+                                {tab === 'ORG_CHART' && <OrgChart globalData={globalData} onRefresh={refreshGlobalData} setGlobalData={setGlobalData} setSyncing={setSyncing} />}
+                            </div>
+                        )}
+                    </main>
+                    <footer className="border-t bg-white py-6 text-center text-xs text-slate-400">
+                        © {new Date().getFullYear()} Church Small Group Manager
+                    </footer>
+                </div >
+            );
+        };
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+
+</html>
