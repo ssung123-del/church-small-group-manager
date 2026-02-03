@@ -1828,29 +1828,44 @@
                 return () => document.removeEventListener('click', handleClick);
             }, [contextMenu]);
 
-            const handleEditClick = () => {
-                if (contextMenu.member) {
+            const handleEditClick = (memberOverride) => {
+                const targetMember = memberOverride || (selectedMembers.length === 1 ? selectedMembers[0].member : contextMenu.member);
+                if (targetMember) {
                     setEditForm({
-                        name: contextMenu.member.name,
-                        role: contextMenu.member.role,
-                        birthdate: contextMenu.member.birthdate,
-                        gender: contextMenu.member.gender,
-                        address: contextMenu.member.address || ''
+                        name: targetMember.name,
+                        role: targetMember.role,
+                        birthdate: targetMember.birthdate,
+                        gender: targetMember.gender,
+                        address: targetMember.address || ''
                     });
-                    setEditModal({ visible: true, member: contextMenu.member });
+                    setEditModal({ visible: true, member: targetMember });
+
+                    // Close context menu if open
+                    if (contextMenu.visible) setContextMenu({ ...contextMenu, visible: false });
                 }
             };
 
             const handleDeleteClick = async () => {
-                if (!contextMenu.member) return;
-                const { member, leaderId } = contextMenu;
-                if (!confirm(`${member.name}님을 삭제(미배정/삭제) 하시겠습니까?\n\n- 확인: 미배정 상태로 변경 (그룹에서 제외)\n- 취소: 작업 취소`)) return;
+                let targets = [];
+                if (selectedMembers.length > 0) {
+                    targets = selectedMembers.map(s => s.member);
+                } else if (contextMenu.member) {
+                    targets = [contextMenu.member];
+                }
+
+                if (targets.length === 0) return;
+
+                const names = targets.map(m => m.name).join(', ');
+                const displayName = targets.length > 3 ? `${targets[0].name} 외 ${targets.length - 1}명` : names;
+
+                if (!confirm(`${displayName}을(를) 정말 그룹에서 제외하시겠습니까? (미배정 상태로 변경됨)`)) return;
 
                 // Optimistic Update
                 const backup = { ...globalData };
 
+                const targetIds = targets.map(m => String(m.id));
                 // Unassign (remove leader_id)
-                const newMembers = members.map(m => m.id === member.id ? { ...m, leader_id: '' } : m);
+                const newMembers = members.map(m => targetIds.includes(String(m.id)) ? { ...m, leader_id: '' } : m);
 
                 // Recalculate leader count
                 const leaderCounts = {};
@@ -1866,8 +1881,13 @@
                 setGlobalData({ ...globalData, members: newMembers, leaders: newLeaders });
                 setSyncing?.(true);
 
+                // Clear selection
+                setSelectedMembers([]);
+                setRecommendedLeaders([]);
+                if (contextMenu.visible) setContextMenu({ ...contextMenu, visible: false });
+
                 try {
-                    await updateMember(member.id, { leader_id: '' });
+                    await Promise.all(targets.map(m => updateMember(m.id, { leader_id: '' })));
                 } catch (err) {
                     alert("삭제 실패: " + err.message);
                     setGlobalData(backup);
@@ -2057,28 +2077,29 @@
                     {/* 선택 상태 안내 배너 */}
                     {/* 선택 상태 안내 배너 (다중 선택 지원) */}
                     {selectedMembers.length > 0 && (
-                        <div className="bg-blue-500 text-white p-3 rounded-xl flex justify-between items-center shadow-lg animate-pulse">
-                            <div className="flex items-center gap-2">
+                        <div className="bg-blue-500 text-white p-2 rounded-xl flex justify-between items-center shadow-lg animate-fade-in-up">
+                            <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
                                 <span className="text-lg">👆</span>
-                                <span className="font-bold">
-                                    {selectedMembers.length}명 선택됨
+                                <span className="font-bold whitespace-nowrap">
+                                    {selectedMembers.length}명
                                     {selectedMembers.length === 1 && <span className="text-sm font-normal ml-1">({selectedMembers[0].member.name})</span>}
                                 </span>
-                                <span className="text-blue-100 hidden sm:inline"> - 이동할 그룹을 터치하세요</span>
-                                {recommendedLeaders.length > 0 && (
-                                    <span className="bg-amber-400 text-amber-900 px-2 py-0.5 rounded-full text-xs font-bold ml-2">
-                                        🌟 추천 그룹
-                                    </span>
+                                <div className="h-4 w-px bg-blue-300 mx-1"></div>
+
+                                {selectedMembers.length === 1 && (
+                                    <button onClick={() => handleEditClick()} className="bg-white/20 hover:bg-white/30 px-3 py-1 rounded-lg text-sm font-bold transition-colors flex items-center gap-1 whitespace-nowrap">
+                                        ✏️ 수정
+                                    </button>
                                 )}
-                                {selectedMembers.length > 0 && recommendedLeaders.length === 0 && (!selectedMembers[selectedMembers.length - 1].member.lat || !selectedMembers[selectedMembers.length - 1].member.lng) && (
-                                    <span className="bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full text-xs font-bold ml-2">
-                                        ⚠️ 위치 정보 없음
-                                    </span>
-                                )}
+                                <button onClick={() => handleDeleteClick()} className="bg-white/20 hover:bg-red-500/80 px-3 py-1 rounded-lg text-sm font-bold transition-colors flex items-center gap-1 whitespace-nowrap">
+                                    🗑️ 제외
+                                </button>
+
+                                <span className="text-blue-100 text-xs hidden sm:inline ml-2 whitespace-nowrap"> - 이동할 그룹 터치</span>
                             </div>
                             <button
                                 onClick={() => { setSelectedMembers([]); setRecommendedLeaders([]); }}
-                                className="bg-white/20 hover:bg-white/30 px-3 py-1 rounded-lg text-sm font-medium transition-colors"
+                                className="bg-white/20 hover:bg-white/30 px-3 py-1 rounded-lg text-sm font-medium transition-colors ml-2 whitespace-nowrap"
                             >
                                 ✕ 취소
                             </button>
@@ -2220,7 +2241,7 @@
                             style={{ top: contextMenu.y, left: contextMenu.x }}
                             onClick={(e) => e.stopPropagation()}
                         >
-                            <button onClick={handleEditClick} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2">
+                            <button onClick={() => handleEditClick(null)} className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2">
                                 ✏️ 수정
                             </button>
                             <button onClick={handleDeleteClick} className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2">
