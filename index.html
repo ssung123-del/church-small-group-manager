@@ -1767,6 +1767,12 @@
             const [selectedMembers, setSelectedMembers] = useState([]);
             // 추천 리더 ID 목록 (마지막 선택된 멤버 기준)
             const [recommendedLeaders, setRecommendedLeaders] = useState([]);
+            // 정렬 옵션: 'name' (이름순), 'members' (인원순)
+            const [sortOption, setSortOption] = useState('name');
+            // 순원 추가 모달
+            const [addMemberModal, setAddMemberModal] = useState({ visible: false, leaderId: null, leaderName: '' });
+            const [addMemberForm, setAddMemberForm] = useState({ name: '', role: '성도', gender: 'Male', birthdate: '', contact: '', address: '' });
+            const [addingSaving, setAddingSaving] = useState(false);
 
             // Context Menu State
             const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, member: null, leaderId: null });
@@ -1775,8 +1781,44 @@
             // Edit Form State
             const [editForm, setEditForm] = useState({ name: '', role: '', birthdate: '', gender: '', address: '' });
 
-            // 리더별로 그룹핑 (순원 수 적은 순)
-            const sortedLeaders = [...leaders].sort((a, b) => (a.current_members || 0) - (b.current_members || 0));
+            // 성별 판별 함수 (남성: 0, 여성: 1)
+            const getGenderOrder = (g) => {
+                const s = String(g || '').toLowerCase();
+                return ['female', '여', '여성', 'f', '女'].some(v => s.includes(v)) ? 1 : 0;
+            };
+
+            // 그룹 분류 기준
+            const GROUP_REGULAR = ['곽현정', '권순이', '김옥순', '김주현', '김현정', '노원옥', '박윤경', '백선주', '서윤희', '신길선', '신혜선', '양미자', '온윤경', '윤상미', '윤향숙', '이경희', '이은정', '이정남', '이정민', '임민정', '조은재', '한인순', '현진섭', '홍봉숙'];
+            const GROUP_WORK = ['강민정', '김수미', '박순애', '서지혜', '오은미', '이명숙', '이사랑', '최봉은', '최진숙'];
+            const GROUP_MANAGE = ['유경옥'];
+
+            // 그룹 번호 반환 (일반: 0, 직장: 1, 관리: 2, 미분류: 3)
+            const getGroupOrder = (name) => {
+                const n = (name || '').trim();
+                if (GROUP_REGULAR.includes(n)) return 0;
+                if (GROUP_WORK.includes(n)) return 1;
+                if (GROUP_MANAGE.includes(n)) return 2;
+                return 3; // 미분류
+            };
+
+            // 정렬 로직: 일반순 → 직장순 → 관리순, 각 그룹 내에서 이름순/인원순
+            const getSortedLeaders = () => {
+                return [...leaders].sort((a, b) => {
+                    // 1차: 그룹 순서
+                    const groupDiff = getGroupOrder(a.name) - getGroupOrder(b.name);
+                    if (groupDiff !== 0) return groupDiff;
+
+                    // 2차: 그룹 내 정렬 (이름순 또는 인원순)
+                    if (sortOption === 'members') {
+                        return (a.current_members || 0) - (b.current_members || 0);
+                    }
+                    // 기본: 이름순 (성별 → 이름)
+                    const genderDiff = getGenderOrder(a.gender) - getGenderOrder(b.gender);
+                    if (genderDiff !== 0) return genderDiff;
+                    return (a.name || '').localeCompare(b.name || '', 'ko');
+                });
+            };
+            const sortedLeaders = getSortedLeaders();
             const groups = sortedLeaders.map(l => ({
                 leader: l,
                 members: members.filter(m => String(m.leader_id) === String(l.id)).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ko'))
@@ -2096,15 +2138,61 @@
                 XLSX.writeFile(wb, `조직도_${new Date().toISOString().slice(0, 10)}.xlsx`);
             };
 
+            // 순원 추가 핸들러
+            const handleAddMemberClick = (leaderId, leaderName, e) => {
+                e?.stopPropagation();
+                setAddMemberForm({ name: '', role: '성도', gender: 'Male', birthdate: '', contact: '', address: '' });
+                setAddMemberModal({ visible: true, leaderId, leaderName });
+            };
+
+            const handleAddMemberSubmit = async (e) => {
+                e.preventDefault();
+                if (!addMemberForm.name || !addMemberForm.address) {
+                    alert('이름과 주소는 필수입니다.');
+                    return;
+                }
+                setAddingSaving(true);
+                try {
+                    const geo = await geocodeAddress(addMemberForm.address);
+                    const newMember = {
+                        ...addMemberForm,
+                        contact: formatPhone(addMemberForm.contact),
+                        lat: geo.lat,
+                        lng: geo.lng,
+                        leader_id: addMemberModal.leaderId || '',
+                        status: addMemberModal.leaderId ? 'assigned' : 'wants_group'
+                    };
+                    await insertMember(newMember);
+                    alert(`${addMemberForm.name}님이 ${addMemberModal.leaderName || '미배정'}에 등록되었습니다!`);
+                    setAddMemberModal({ visible: false, leaderId: null, leaderName: '' });
+                    onRefresh?.();
+                } catch (err) {
+                    alert(`등록 실패: ${err.message}`);
+                } finally {
+                    setAddingSaving(false);
+                }
+            };
+
             return (
                 <div className="space-y-6 pb-12">
-                    <div className="flex justify-between items-center bg-white p-4 rounded-2xl border shadow-sm print:hidden">
+                    <div className="flex flex-wrap justify-between items-center gap-3 bg-white p-4 rounded-2xl border shadow-sm print:hidden">
                         <h2 className="text-xl font-bold flex items-center gap-2">
                             <span>📊</span> 조직도 (터치하여 이동)
                         </h2>
-                        <button onClick={exportExcel} className="bg-green-600 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-green-700 flex items-center gap-2 transition-colors shadow-sm">
-                            <span>📅</span> 엑셀 다운로드
-                        </button>
+                        <div className="flex items-center gap-3 flex-wrap">
+                            {/* 정렬 옵션 */}
+                            <div className="flex bg-slate-100 p-0.5 rounded-lg text-xs">
+                                <button onClick={() => setSortOption('name')} className={`px-2 py-1 rounded ${sortOption === 'name' ? 'bg-white text-brand-600 font-bold shadow-sm' : 'text-slate-500'}`}>이름순</button>
+                                <button onClick={() => setSortOption('members')} className={`px-2 py-1 rounded ${sortOption === 'members' ? 'bg-white text-brand-600 font-bold shadow-sm' : 'text-slate-500'}`}>인원순</button>
+                            </div>
+                            {/* 순원 추가 버튼 */}
+                            <button onClick={(e) => handleAddMemberClick('', '미배정', e)} className="bg-brand-600 text-white px-3 py-1.5 rounded-lg font-bold text-sm hover:bg-brand-700 flex items-center gap-1 transition-colors">
+                                <span>➕</span> 순원 등록
+                            </button>
+                            <button onClick={exportExcel} className="bg-green-600 text-white px-3 py-1.5 rounded-lg font-bold text-sm hover:bg-green-700 flex items-center gap-1 transition-colors shadow-sm">
+                                <span>📅</span> 엑셀
+                            </button>
+                        </div>
                     </div>
 
                     {/* 선택 상태 안내 배너 */}
@@ -2187,6 +2275,14 @@
                                                 )}
                                                 <div className="text-xs opacity-80 font-light">{formatRole(leader.role)}</div>
                                                 <div className="text-base font-bold truncate">{leader.name} {calcAge(leader.birthdate) > 0 ? `(${calcAge(leader.birthdate)})` : ''}</div>
+                                                {/* 리더 카드에 순원 추가 버튼 */}
+                                                <button
+                                                    onClick={(e) => handleAddMemberClick(leader.id, leader.name, e)}
+                                                    className="absolute top-1 right-1 w-5 h-5 bg-white/30 hover:bg-white/50 rounded-full text-xs flex items-center justify-center transition-colors"
+                                                    title="이 그룹에 순원 추가"
+                                                >
+                                                    ➕
+                                                </button>
                                             </div>
                                             <div className="p-2 flex-1 bg-white space-y-1 min-h-[100px]">
                                                 {members.length === 0 ? (
@@ -2320,6 +2416,57 @@
                                         <button type="button" onClick={() => handleDeletePermanently()} className="mr-auto text-red-500 text-xs font-bold px-3 py-2 hover:bg-red-50 rounded-lg transition-colors">영구 삭제</button>
                                         <button type="button" onClick={() => setEditModal({ visible: false, member: null })} className="px-4 py-2 text-slate-500 font-bold hover:bg-slate-100 rounded-xl transition-colors">취소</button>
                                         <button type="submit" className="px-4 py-2 bg-brand-600 text-white font-bold rounded-xl hover:bg-brand-700 transition-colors">저장</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 순원 추가 모달 */}
+                    {addMemberModal.visible && (
+                        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-[110] animate-fade-in">
+                            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 m-4" onClick={(e) => e.stopPropagation()}>
+                                <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+                                    ➕ 순원 등록
+                                    {addMemberModal.leaderName && <span className="text-sm font-normal text-slate-500">→ {addMemberModal.leaderName}</span>}
+                                </h3>
+                                <form onSubmit={handleAddMemberSubmit} className="space-y-4">
+                                    <div>
+                                        <label className="text-xs font-bold text-slate-500 block mb-1">이름 *</label>
+                                        <input required value={addMemberForm.name} onChange={e => setAddMemberForm({ ...addMemberForm, name: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" placeholder="홍길동" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-bold text-slate-500 block mb-1">주소 *</label>
+                                        <input required value={addMemberForm.address} onChange={e => setAddMemberForm({ ...addMemberForm, address: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" placeholder="서울시 강남구..." />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="text-xs font-bold text-slate-500 block mb-1">직분</label>
+                                            <input value={addMemberForm.role} onChange={e => setAddMemberForm({ ...addMemberForm, role: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" placeholder="성도" />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs font-bold text-slate-500 block mb-1">성별</label>
+                                            <select value={addMemberForm.gender} onChange={e => setAddMemberForm({ ...addMemberForm, gender: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm">
+                                                <option value="Male">남성</option>
+                                                <option value="Female">여성</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="text-xs font-bold text-slate-500 block mb-1">생년월일</label>
+                                            <input type="date" value={addMemberForm.birthdate} onChange={e => setAddMemberForm({ ...addMemberForm, birthdate: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs font-bold text-slate-500 block mb-1">연락처</label>
+                                            <input value={addMemberForm.contact} onChange={e => setAddMemberForm({ ...addMemberForm, contact: formatPhone(e.target.value) })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" placeholder="010-0000-0000" />
+                                        </div>
+                                    </div>
+                                    <div className="flex justify-end gap-2 mt-6">
+                                        <button type="button" onClick={() => setAddMemberModal({ visible: false, leaderId: null, leaderName: '' })} className="px-4 py-2 text-slate-500 font-bold hover:bg-slate-100 rounded-xl transition-colors">취소</button>
+                                        <button type="submit" disabled={addingSaving} className="px-4 py-2 bg-brand-600 text-white font-bold rounded-xl hover:bg-brand-700 transition-colors disabled:opacity-50">
+                                            {addingSaving ? '등록 중...' : '등록'}
+                                        </button>
                                     </div>
                                 </form>
                             </div>
