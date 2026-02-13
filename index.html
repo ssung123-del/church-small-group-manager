@@ -734,10 +734,10 @@
             const downloadSampleCSV = () => {
                 let csvContent, filename;
                 if (scope === 'LEADER') {
-                    csvContent = "name,role,gender,birthdate,contact,address,max_capacity\n홍길동,집사,Male,1980-03-15,010-1234-5678,서울시 강남구 역삼동 123,10\n김영희,권사,Female,1973-08-22,010-9876-5432,서울시 서초구 서초동 456,8";
+                    csvContent = "name,role,gender,birthdate,contact,address,lat,lng,max_capacity\n홍길동,집사,Male,1980-03-15,010-1234-5678,서울시 강남구 역삼동 123,,,10\n김영희,권사,Female,1973-08-22,010-9876-5432,서울시 서초구 서초동 456,37.483569,127.032598,8";
                     filename = "리더_샘플.csv";
                 } else {
-                    csvContent = "name,role,gender,birthdate,contact,address,leader_name,status\n이철수,성도,Male,1990-05-10,010-1111-2222,서울시 송파구 잠실동 789,홍길동,wants_group\n박민영,청년,Female,1997-12-03,010-3333-4444,서울시 강동구 천호동 321,,no_group";
+                    csvContent = "name,role,gender,birthdate,contact,address,lat,lng,leader_name,status\n이철수,성도,Male,1990-05-10,010-1111-2222,서울시 송파구 잠실동 789,,,,wants_group\n박민영,청년,Female,1997-12-03,010-3333-4444,서울시 강동구 천호동 321,37.538484,127.123636,,no_group";
                     filename = "순원_샘플.csv";
                 }
                 const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -745,6 +745,35 @@
                 link.href = URL.createObjectURL(blob);
                 link.download = filename;
                 link.click();
+            };
+
+            const shouldRetryGeocode = message => {
+                const m = String(message || '').toUpperCase();
+                return m.includes('OVER_QUERY_LIMIT') || m.includes('UNKNOWN_ERROR') || m.includes('ERROR');
+            };
+
+            const geocodeWithRetry = async (address, maxRetries = 2) => {
+                let lastError = null;
+                for (let attempt = 0; attempt <= maxRetries; attempt++) {
+                    try {
+                        return await geocodeAddress(address);
+                    } catch (err) {
+                        lastError = err;
+                        if (!shouldRetryGeocode(err?.message) || attempt === maxRetries) break;
+                        const backoffMs = 700 * (2 ** attempt);
+                        await sleep(backoffMs);
+                    }
+                }
+                throw lastError || new Error('Geocode failed');
+            };
+
+            const downloadFailedRowsCSV = (failedRows) => {
+                if (!failedRows?.length) return;
+                const ws = XLSX.utils.json_to_sheet(failedRows);
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, "실패행");
+                const fileName = `업로드실패_${scope}_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`;
+                XLSX.writeFile(wb, fileName, { bookType: 'csv' });
             };
 
             const upload = e => {
@@ -764,6 +793,7 @@
                         };
                         const leaderRows = [];
                         const memberRows = [];
+                        const failedRows = [];
                         log(`${rows.length}개 처리 시작`);
 
                         for (let i = 0; i < rows.length; i++) {
@@ -788,7 +818,7 @@
                                 if (hasCoords) {
                                     geo = { lat: csvLat, lng: csvLng, formattedAddress: address || '' };
                                 } else {
-                                    geo = await geocodeAddress(address);
+                                    geo = await geocodeWithRetry(address, 2);
                                     await sleep(GEOCODE_DELAY_MS);
                                 }
                                 if (scope === 'LEADER') {
@@ -829,6 +859,10 @@
                             } catch (err) {
                                 const reason = err?.message || String(err) || 'unknown';
                                 log(`[ERR] ${name}: ${reason}`);
+                                failedRows.push({
+                                    ...row,
+                                    error_reason: reason
+                                });
                             }
                             setProgress(Math.round(((i + 1) / rows.length) * 100));
                         }
@@ -840,6 +874,10 @@
                                 await refreshAllLeaderCounts();
                             }
                             log(`완료: ${scope === 'LEADER' ? leaderRows.length : memberRows.length}건 저장`);
+                            if (failedRows.length) {
+                                log(`실패 ${failedRows.length}건: 실패 CSV 다운로드`);
+                                downloadFailedRowsCSV(failedRows);
+                            }
                         } catch (saveErr) {
                             log(`[ERR] 저장 실패: ${saveErr.message}`);
                         } finally {
