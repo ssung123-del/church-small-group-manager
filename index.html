@@ -181,7 +181,8 @@
         const newNumericId = () => Date.now() + Math.floor(Math.random() * 100000);
         const docToItem = doc => {
             const data = doc.data() || {};
-            return { ...data, id: data.id ?? Number(doc.id) || doc.id };
+            const fallbackId = Number.isFinite(Number(doc.id)) ? Number(doc.id) : doc.id;
+            return { ...data, id: data.id ?? fallbackId };
         };
         const recalcLeaderCount = async (db, leaderId) => {
             if (leaderId === undefined || leaderId === null || String(leaderId) === '') return;
