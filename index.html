@@ -420,6 +420,14 @@
         };
         // 성별 아이콘 (다양한 형식 지원: Female, 여, 여성, F, 女)
         const genderIcon = (g) => { const s = String(g || '').toLowerCase(); if (['male', '남', '남성', 'm', '男'].some(v => s.includes(v))) return '👨'; if (['female', '여', '여성', 'f', '女'].some(v => s.includes(v))) return '👩'; return '👤'; };
+        // 성별 정규화: 남/여, 남성/여성, M/F 등을 Male/Female로 통일
+        const normalizeGender = (g) => {
+            const s = String(g || '').trim().toLowerCase();
+            if (!s) return 'Male';
+            if (['male', 'm', '남', '남성', 'man', '남자', '男'].includes(s)) return 'Male';
+            if (['female', 'f', '여', '여성', 'woman', '여자', '女'].includes(s)) return 'Female';
+            return 'Male';
+        };
         // 직분 간소화 (권사 포함→권사, 안수집사 포함→안수집사, 서리집사는 유지)
         const formatRole = (r) => { if (!r) return ''; const s = String(r); if (s.includes('서리집사')) return s; if (s.includes('안수집사')) return '안수집사'; if (s.includes('권사')) return '권사'; return s; };
         // 연락처 자동 포맷팅 (010-0000-0000 형태)
@@ -788,7 +796,7 @@
                                         id: newNumericId(),
                                         name,
                                         role: row.role || '성도',
-                                        gender: row.gender || 'Male',
+                                        gender: normalizeGender(row.gender),
                                         birthdate: row.birthdate || '',
                                         contact: row.contact || '',
                                         address: geo.formattedAddress || address,
@@ -807,7 +815,7 @@
                                         id: newNumericId(),
                                         name,
                                         role: row.role || '성도',
-                                        gender: row.gender || 'Male',
+                                        gender: normalizeGender(row.gender),
                                         birthdate: row.birthdate || '',
                                         contact: row.contact || '',
                                         address: geo.formattedAddress || address,
@@ -842,7 +850,7 @@
                 });
             };
 
-            const submit = async e => { e.preventDefault(); setSaving(true); try { if (scope === 'LEADER') { const geo = await geocodeAddress(form.address); await insertLeader({ ...form, max_capacity: parseInt(form.max_capacity), lat: geo.lat, lng: geo.lng, current_members: 0 }); alert("등록 완료"); setForm({ name: '', role: '집사', gender: 'Male', birthdate: '', contact: '', address: '', max_capacity: 10 }) } else { const geo = await geocodeAddress(mForm.address); await insertMember({ ...mForm, lat: geo.lat, lng: geo.lng, leader_id: mForm.leader_id ? parseInt(mForm.leader_id) : null, status: mForm.status || 'wants_group' }); alert("등록 완료"); setMForm({ name: '', role: '성도', gender: 'Male', birthdate: '', contact: '', address: '', leader_id: '', status: 'wants_group' }) } loadData() } catch (err) { alert(err.message) } finally { setSaving(false) } };
+            const submit = async e => { e.preventDefault(); setSaving(true); try { if (scope === 'LEADER') { const geo = await geocodeAddress(form.address); await insertLeader({ ...form, gender: normalizeGender(form.gender), max_capacity: parseInt(form.max_capacity), lat: geo.lat, lng: geo.lng, current_members: 0 }); alert("등록 완료"); setForm({ name: '', role: '집사', gender: 'Male', birthdate: '', contact: '', address: '', max_capacity: 10 }) } else { const geo = await geocodeAddress(mForm.address); await insertMember({ ...mForm, gender: normalizeGender(mForm.gender), lat: geo.lat, lng: geo.lng, leader_id: mForm.leader_id ? parseInt(mForm.leader_id) : null, status: mForm.status || 'wants_group' }); alert("등록 완료"); setMForm({ name: '', role: '성도', gender: 'Male', birthdate: '', contact: '', address: '', leader_id: '', status: 'wants_group' }) } loadData() } catch (err) { alert(err.message) } finally { setSaving(false) } };
 
             const delLeader = async (id, e) => { e.stopPropagation(); if (!confirm("삭제? 소속 순원은 미배정 상태가 됩니다.")) return; await deleteLeader(id); loadData() };
             const delMember = async (id, e) => { e.stopPropagation(); if (!confirm("삭제?")) return; await removeMember(id, null, 'DELETE'); loadData() };
@@ -859,7 +867,7 @@
                     await insertLeader({
                         name: member.name,
                         role: member.role || '집사',
-                        gender: member.gender || 'Male',
+                        gender: normalizeGender(member.gender),
                         birthdate: member.birthdate || '',
                         contact: member.contact || '',
                         address: member.address || '',
@@ -884,7 +892,7 @@
                 const csvData = leaders.map(l => ({
                     name: l.name,
                     role: l.role || '',
-                    gender: l.gender || 'Male',
+                    gender: normalizeGender(l.gender),
                     birthdate: formatBirthdate(l.birthdate),
                     contact: l.contact || '',
                     address: l.address || '',
@@ -903,7 +911,7 @@
                     return {
                         name: m.name,
                         role: m.role || '',
-                        gender: m.gender || 'Male',
+                        gender: normalizeGender(m.gender),
                         birthdate: formatBirthdate(m.birthdate),
                         contact: m.contact || '',
                         address: m.address || '',
@@ -1389,7 +1397,7 @@
             // 미배정 인원 선택
             const selectUnassigned = async (member) => {
                 setSelectedMemberId(member.id);
-                setForm({ name: member.name, role: member.role || '성도', birthdate: formatBirthdate(member.birthdate), gender: member.gender || 'Male', address: member.address || '' });
+                setForm({ name: member.name, role: member.role || '성도', birthdate: formatBirthdate(member.birthdate), gender: normalizeGender(member.gender), address: member.address || '' });
                 // setShowUnassigned(false); // Removed
                 // 자동으로 리더 검색 (Direct Action)
                 if (member.address && member.birthdate) {
@@ -2725,6 +2733,7 @@
                     const geo = await geocodeAddress(addMemberForm.address);
                     const newMember = {
                         ...addMemberForm,
+                        gender: normalizeGender(addMemberForm.gender),
                         contact: formatPhone(addMemberForm.contact),
                         lat: geo.lat,
                         lng: geo.lng,
