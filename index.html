@@ -826,8 +826,9 @@
                                     });
                                 }
                                 log(`[OK] ${name}`);
-                            } catch {
-                                log(`[ERR] ${name}`);
+                            } catch (err) {
+                                const reason = err?.message || String(err) || 'unknown';
+                                log(`[ERR] ${name}: ${reason}`);
                             }
                             setProgress(Math.round(((i + 1) / rows.length) * 100));
                         }
