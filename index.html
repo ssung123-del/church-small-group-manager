@@ -360,30 +360,97 @@
             return R * c;
         };
 
-        const findClosest = (lat, lng, birthdate, leaders, topN = 3) => {
+        const RECOMMEND_WEIGHTS_KEY = 'CHURCH_GROUP_RECOMMEND_WEIGHTS';
+        const DEFAULT_RECOMMEND_WEIGHTS = { distance: 45, age: 25, gender: 15, role: 15 };
+
+        const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
+        const getStoredRecommendWeights = () => {
+            try {
+                const raw = localStorage.getItem(RECOMMEND_WEIGHTS_KEY);
+                if (!raw) return { ...DEFAULT_RECOMMEND_WEIGHTS };
+                const parsed = JSON.parse(raw);
+                return {
+                    distance: clamp(Number(parsed.distance || DEFAULT_RECOMMEND_WEIGHTS.distance), 0, 100),
+                    age: clamp(Number(parsed.age || DEFAULT_RECOMMEND_WEIGHTS.age), 0, 100),
+                    gender: clamp(Number(parsed.gender || DEFAULT_RECOMMEND_WEIGHTS.gender), 0, 100),
+                    role: clamp(Number(parsed.role || DEFAULT_RECOMMEND_WEIGHTS.role), 0, 100)
+                };
+            } catch {
+                return { ...DEFAULT_RECOMMEND_WEIGHTS };
+            }
+        };
+        const saveRecommendWeights = (weights) => localStorage.setItem(RECOMMEND_WEIGHTS_KEY, JSON.stringify(weights));
+        const resolveRecommendWeights = (weights) => weights || getStoredRecommendWeights();
+        const normalizeRoleKey = (r) => {
+            const s = String(r || '').trim();
+            if (!s) return '';
+            if (s.includes('서리집사')) return '서리집사';
+            if (s.includes('안수집사')) return '안수집사';
+            if (s.includes('집사')) return '집사';
+            if (s.includes('권사')) return '권사';
+            if (s.includes('장로')) return '장로';
+            if (s.includes('청년')) return '청년';
+            if (s.includes('성도')) return '성도';
+            return s;
+        };
+        const normalizeName = (name) => String(name || '').replace(/\s+/g, ' ').trim();
+        const normalizeAddressText = (address) => String(address || '').replace(/\s+/g, ' ').trim();
+        const normalizePhone = (contact) => formatPhone(String(contact || ''));
+        const normalizePersonRecord = (row) => ({
+            ...row,
+            name: normalizeName(row?.name),
+            address: normalizeAddressText(row?.address),
+            contact: normalizePhone(row?.contact),
+            gender: normalizeGender(row?.gender),
+            role: formatRole(row?.role || '')
+        });
+        const buildRecommendReason = ({ distance, ageDiff, genderPenalty, rolePenalty }) =>
+            `거리 ${Number(distance || 0).toFixed(1)}km · 나이차 ${ageDiff}세 · 성별 ${genderPenalty === 0 ? '일치' : '혼합'} · 직분 ${rolePenalty === 0 ? '유사' : '다름'}`;
+        const scoreLeaderMemberFit = (leader, member, weights) => {
+            const w = resolveRecommendWeights(weights);
+            const totalW = Math.max(1, Number(w.distance) + Number(w.age) + Number(w.gender) + Number(w.role));
+            const wd = Number(w.distance) / totalW;
+            const wa = Number(w.age) / totalW;
+            const wg = Number(w.gender) / totalW;
+            const wr = Number(w.role) / totalW;
+
+            const distance = getDistance(Number(member.lat), Number(member.lng), Number(leader.lat), Number(leader.lng));
+            const ageDiff = Math.abs(calcAge(member.birthdate || '2000-01-01') - calcAge(leader.birthdate || '1980-01-01'));
+            const genderPenalty = normalizeGender(member.gender) === normalizeGender(leader.gender) ? 0 : 1;
+            const rolePenalty = normalizeRoleKey(member.role) && normalizeRoleKey(member.role) === normalizeRoleKey(leader.role) ? 0 : 1;
+
+            const distanceScore = clamp(distance / 15, 0, 1);
+            const ageScore = clamp(ageDiff / 25, 0, 1);
+            const score = (wd * distanceScore) + (wa * ageScore) + (wg * genderPenalty) + (wr * rolePenalty);
+            return {
+                distance,
+                ageDiff,
+                genderPenalty,
+                rolePenalty,
+                score,
+                reason: buildRecommendReason({ distance, ageDiff, genderPenalty, rolePenalty })
+            };
+        };
+        const findClosest = (lat, lng, birthdate, leaders, topN = 3, opts = {}) => {
             if (!lat || !lng) return [];
-            const candidates = leaders.filter(l => l.id && l.lat && l.lng).map(l => {
-                const dist = getDistance(lat, lng, l.lat, l.lng);
-                const ageDiff = Math.abs(calcAge(birthdate || '2000-01-01') - calcAge(l.birthdate || '1980-01-01'));
-                // 거리 우선 + 나이 차이 보정 (10km 이내면 나이 차이 점수 반영 등 - 현재는 단순 거리순)
-                // 거리 점수(km) + 나이차이/10 (10살 차이 = 1km 패널티)
-                const score = dist + (ageDiff / 10);
-                return { ...l, distance: dist, ageDiff, score };
-            });
+            const member = opts.member || { lat, lng, birthdate, gender: opts.gender || '', role: opts.role || '' };
+            const candidates = leaders
+                .filter(l => l.id && l.lat && l.lng)
+                .map(l => {
+                    const fit = scoreLeaderMemberFit(l, member, opts.weights);
+                    return { ...l, ...fit };
+                });
             return candidates.sort((a, b) => a.score - b.score).slice(0, topN);
         };
 
         // 추천 로직 (리더 -> 멤버 모집)
-        const findRecruits = (leader, members, topN = 5) => {
+        const findRecruits = (leader, members, topN = 5, weights) => {
             if (!leader || !leader.lat || !leader.lng) return { unassigned: [], assigned: [] };
 
             // 모든 멤버 스코어링 (배정된 멤버는 자기 식구 제외)
             const candidates = members.filter(m => String(m.leader_id) !== String(leader.id) && m.lat && m.lng).map(m => {
-                const dist = getDistance(leader.lat, leader.lng, m.lat, m.lng);
-                const ageDiff = Math.abs(calcAge(leader.birthdate || '1980-01-01') - calcAge(m.birthdate || '2000-01-01'));
-                // 점수: 거리(km) + (나이차이/10) -- 가까운 순인데 나이 비슷하면 가산점
-                const score = dist + (ageDiff / 20); // 여기선 나이 비중 더 낮춤 (거리가 더 중요)
-                return { ...m, distance: dist, ageDiff, score };
+                const fit = scoreLeaderMemberFit(leader, m, weights);
+                return { ...m, ...fit };
             });
 
             // 미배정 / 배정 분리 정렬
@@ -520,14 +587,18 @@
             const save = async () => {
                 setSaving(true);
                 try {
+                    const normalizedForm = {
+                        ...normalizePersonRecord(form),
+                        max_capacity: parseInt(form.max_capacity, 10) || item.max_capacity || 10
+                    };
                     let updates = {};
                     const fields = type === 'leader'
                         ? ['name', 'role', 'gender', 'birthdate', 'contact', 'address', 'max_capacity']
                         : ['name', 'role', 'gender', 'birthdate', 'contact', 'address', 'leader_id'];
 
                     for (const f of fields) {
-                        if (String(form[f] ?? '') !== String(item[f] ?? '')) {
-                            updates[f] = form[f];
+                        if (String(normalizedForm[f] ?? '') !== String(item[f] ?? '')) {
+                            updates[f] = normalizedForm[f];
                         }
                     }
 
@@ -573,7 +644,7 @@
                 }
             };
 
-            const ic = "block w-full rounded-md border shadow-sm py-2 px-3 text-sm";
+            const ic = "block w-full rounded-md border shadow-sm py-3 px-3 text-base sm:text-sm";
 
             return (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
@@ -797,7 +868,7 @@
                         log(`${rows.length}개 처리 시작`);
 
                         for (let i = 0; i < rows.length; i++) {
-                            const row = rows[i] || {};
+                            const row = normalizePersonRecord(rows[i] || {});
                             const name = String(row.name || '').trim();
                             const address = String(row.address || '').trim();
                             const csvLat = toNumber(row.lat);
@@ -825,10 +896,10 @@
                                     leaderRows.push({
                                         id: newNumericId(),
                                         name,
-                                        role: row.role || '성도',
+                                        role: formatRole(row.role || '성도'),
                                         gender: normalizeGender(row.gender),
                                         birthdate: row.birthdate || '',
-                                        contact: row.contact || '',
+                                        contact: normalizePhone(row.contact),
                                         address: geo.formattedAddress || address,
                                         lat: geo.lat,
                                         lng: geo.lng,
@@ -844,10 +915,10 @@
                                     memberRows.push({
                                         id: newNumericId(),
                                         name,
-                                        role: row.role || '성도',
+                                        role: formatRole(row.role || '성도'),
                                         gender: normalizeGender(row.gender),
                                         birthdate: row.birthdate || '',
-                                        contact: row.contact || '',
+                                        contact: normalizePhone(row.contact),
                                         address: geo.formattedAddress || address,
                                         lat: geo.lat,
                                         lng: geo.lng,
@@ -889,7 +960,44 @@
                 });
             };
 
-            const submit = async e => { e.preventDefault(); setSaving(true); try { if (scope === 'LEADER') { const geo = await geocodeAddress(form.address); await insertLeader({ ...form, gender: normalizeGender(form.gender), max_capacity: parseInt(form.max_capacity), lat: geo.lat, lng: geo.lng, current_members: 0 }); alert("등록 완료"); setForm({ name: '', role: '집사', gender: 'Male', birthdate: '', contact: '', address: '', max_capacity: 10 }) } else { const geo = await geocodeAddress(mForm.address); await insertMember({ ...mForm, gender: normalizeGender(mForm.gender), lat: geo.lat, lng: geo.lng, leader_id: mForm.leader_id ? parseInt(mForm.leader_id) : null, status: mForm.status || 'wants_group' }); alert("등록 완료"); setMForm({ name: '', role: '성도', gender: 'Male', birthdate: '', contact: '', address: '', leader_id: '', status: 'wants_group' }) } loadData() } catch (err) { alert(err.message) } finally { setSaving(false) } };
+            const submit = async e => {
+                e.preventDefault();
+                setSaving(true);
+                try {
+                    if (scope === 'LEADER') {
+                        const normalized = normalizePersonRecord(form);
+                        const geo = await geocodeAddress(normalized.address);
+                        await insertLeader({
+                            ...normalized,
+                            gender: normalizeGender(normalized.gender),
+                            max_capacity: parseInt(normalized.max_capacity, 10) || 10,
+                            lat: geo.lat,
+                            lng: geo.lng,
+                            current_members: 0
+                        });
+                        alert("등록 완료");
+                        setForm({ name: '', role: '집사', gender: 'Male', birthdate: '', contact: '', address: '', max_capacity: 10 });
+                    } else {
+                        const normalized = normalizePersonRecord(mForm);
+                        const geo = await geocodeAddress(normalized.address);
+                        await insertMember({
+                            ...normalized,
+                            gender: normalizeGender(normalized.gender),
+                            lat: geo.lat,
+                            lng: geo.lng,
+                            leader_id: normalized.leader_id ? parseInt(normalized.leader_id, 10) : null,
+                            status: normalized.status || 'wants_group'
+                        });
+                        alert("등록 완료");
+                        setMForm({ name: '', role: '성도', gender: 'Male', birthdate: '', contact: '', address: '', leader_id: '', status: 'wants_group' });
+                    }
+                    loadData();
+                } catch (err) {
+                    alert(err.message);
+                } finally {
+                    setSaving(false);
+                }
+            };
 
             const delLeader = async (id, e) => { e.stopPropagation(); if (!confirm("삭제? 소속 순원은 미배정 상태가 됩니다.")) return; await deleteLeader(id); loadData() };
             const delMember = async (id, e) => { e.stopPropagation(); if (!confirm("삭제?")) return; await removeMember(id, null, 'DELETE'); loadData() };
@@ -904,12 +1012,12 @@
                 try {
                     // 1. 리더로 등록
                     await insertLeader({
-                        name: member.name,
-                        role: member.role || '집사',
+                        name: normalizeName(member.name),
+                        role: formatRole(member.role || '집사'),
                         gender: normalizeGender(member.gender),
                         birthdate: member.birthdate || '',
-                        contact: member.contact || '',
-                        address: member.address || '',
+                        contact: normalizePhone(member.contact),
+                        address: normalizeAddressText(member.address),
                         lat: member.lat || 0,
                         lng: member.lng || 0,
                         max_capacity: 10,
@@ -962,6 +1070,59 @@
                 const wb = XLSX.utils.book_new();
                 XLSX.utils.book_append_sheet(wb, ws, "순원");
                 XLSX.writeFile(wb, `순원_${new Date().toISOString().slice(0, 10)}.csv`, { bookType: 'csv' });
+            };
+
+            const normalizeAllRecords = async () => {
+                if (!confirm('이름/연락처/주소/성별/직분을 표준화하시겠습니까?')) return;
+                setProcessing(true);
+                setLogs([]);
+                setProgress(0);
+                let changed = 0;
+                const total = leaders.length + members.length || 1;
+                let done = 0;
+                log(`표준화 시작: 총 ${total}건`);
+                try {
+                    for (const l of leaders) {
+                        const n = normalizePersonRecord(l);
+                        const updates = {};
+                        if (n.name !== (l.name || '')) updates.name = n.name;
+                        if (n.contact !== (l.contact || '')) updates.contact = n.contact;
+                        if (n.address !== (l.address || '')) updates.address = n.address;
+                        if (n.gender !== normalizeGender(l.gender)) updates.gender = n.gender;
+                        if (n.role !== formatRole(l.role || '')) updates.role = n.role;
+                        if (Object.keys(updates).length) {
+                            await updateLeader(l.id, updates);
+                            changed++;
+                            log(`[정규화] 리더 ${l.name}`);
+                        }
+                        done++;
+                        setProgress(Math.round((done / total) * 100));
+                    }
+                    for (const m of members) {
+                        const n = normalizePersonRecord(m);
+                        const updates = {};
+                        if (n.name !== (m.name || '')) updates.name = n.name;
+                        if (n.contact !== (m.contact || '')) updates.contact = n.contact;
+                        if (n.address !== (m.address || '')) updates.address = n.address;
+                        if (n.gender !== normalizeGender(m.gender)) updates.gender = n.gender;
+                        if (n.role !== formatRole(m.role || '')) updates.role = n.role;
+                        if (Object.keys(updates).length) {
+                            await updateMember(m.id, updates);
+                            changed++;
+                            log(`[정규화] 순원 ${m.name}`);
+                        }
+                        done++;
+                        setProgress(Math.round((done / total) * 100));
+                    }
+                    log(`완료: ${changed}건 변경`);
+                    alert(`표준화 완료: ${changed}건 변경`);
+                    loadData();
+                } catch (err) {
+                    log(`[ERR] 표준화 실패: ${err.message}`);
+                    alert(`표준화 실패: ${err.message}`);
+                } finally {
+                    setProcessing(false);
+                }
             };
 
             // 일괄 삭제 함수
@@ -1057,27 +1218,27 @@
                     ) : (
                         <form onSubmit={submit} className="bg-white rounded-2xl border p-6 space-y-3">
                             {scope === 'LEADER' ? <>
-                                <input required value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className={ic} placeholder="이름" />
-                                <input required value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} className={ic} placeholder="주소" />
+                                <input required value={form.name} onChange={e => setForm({ ...form, name: normalizeName(e.target.value) })} className={ic} placeholder="이름" inputMode="text" autoComplete="name" />
+                                <input required value={form.address} onChange={e => setForm({ ...form, address: normalizeAddressText(e.target.value) })} className={ic} placeholder="주소" inputMode="text" autoComplete="street-address" />
                                 <div className="grid grid-cols-2 gap-2">
                                     <input type="date" required value={form.birthdate} onChange={e => setForm({ ...form, birthdate: e.target.value })} className={ic} title="생년월일" />
                                     <select value={form.gender} onChange={e => setForm({ ...form, gender: e.target.value })} className={ic}><option value="Male">남</option><option value="Female">여</option></select>
                                 </div>
                                 <div className="grid grid-cols-2 gap-2">
-                                    <input value={form.role} onChange={e => setForm({ ...form, role: e.target.value })} className={ic} placeholder="직분 (예: 집사)" />
-                                    <input value={form.contact} onChange={e => setForm({ ...form, contact: formatPhone(e.target.value) })} className={ic} placeholder="연락처" />
+                                    <input value={form.role} onChange={e => setForm({ ...form, role: e.target.value })} className={ic} placeholder="직분 (예: 집사)" inputMode="text" />
+                                    <input value={form.contact} onChange={e => setForm({ ...form, contact: formatPhone(e.target.value) })} className={ic} placeholder="연락처" inputMode="numeric" autoComplete="tel" />
                                 </div>
                                 <input type="number" value={form.max_capacity} onChange={e => setForm({ ...form, max_capacity: e.target.value })} className={ic} placeholder="정원 (기본 10명)" min="1" />
                             </> : <>
-                                <input required value={mForm.name} onChange={e => setMForm({ ...mForm, name: e.target.value })} className={ic} placeholder="이름" />
-                                <input required value={mForm.address} onChange={e => setMForm({ ...mForm, address: e.target.value })} className={ic} placeholder="주소" />
+                                <input required value={mForm.name} onChange={e => setMForm({ ...mForm, name: normalizeName(e.target.value) })} className={ic} placeholder="이름" inputMode="text" autoComplete="name" />
+                                <input required value={mForm.address} onChange={e => setMForm({ ...mForm, address: normalizeAddressText(e.target.value) })} className={ic} placeholder="주소" inputMode="text" autoComplete="street-address" />
                                 <div className="grid grid-cols-2 gap-2">
                                     <input type="date" required value={mForm.birthdate} onChange={e => setMForm({ ...mForm, birthdate: e.target.value })} className={ic} title="생년월일" />
                                     <select value={mForm.gender} onChange={e => setMForm({ ...mForm, gender: e.target.value })} className={ic}><option value="Male">남</option><option value="Female">여</option></select>
                                 </div>
                                 <div className="grid grid-cols-2 gap-2">
-                                    <input value={mForm.role} onChange={e => setMForm({ ...mForm, role: e.target.value })} className={ic} placeholder="직분 (예: 성도)" />
-                                    <input value={mForm.contact} onChange={e => setMForm({ ...mForm, contact: formatPhone(e.target.value) })} className={ic} placeholder="연락처" />
+                                    <input value={mForm.role} onChange={e => setMForm({ ...mForm, role: e.target.value })} className={ic} placeholder="직분 (예: 성도)" inputMode="text" />
+                                    <input value={mForm.contact} onChange={e => setMForm({ ...mForm, contact: formatPhone(e.target.value) })} className={ic} placeholder="연락처" inputMode="numeric" autoComplete="tel" />
                                 </div>
                                 <select value={mForm.leader_id} onChange={e => setMForm({ ...mForm, leader_id: e.target.value })} className={ic}>
                                     <option value="">미배정 (리더 선택)</option>
@@ -1101,6 +1262,7 @@
                             </div>
                             <div className="flex gap-2 flex-wrap">
                                 <button onClick={() => setShowDupCheck(true)} className="text-xs bg-red-50 text-red-600 px-3 py-1 rounded border border-red-200 hover:bg-red-100 font-medium">🔍 중복검사</button>
+                                <button onClick={normalizeAllRecords} disabled={processing} className="text-xs bg-indigo-50 text-indigo-700 px-3 py-1 rounded border border-indigo-200 hover:bg-indigo-100 font-medium disabled:opacity-50">🧹 표준화</button>
                                 {listTab === 'LEADER' && <button onClick={exportLeadersCSV} className="text-xs bg-green-50 text-green-700 px-3 py-1 rounded border border-green-200">📥 리더 CSV</button>}
                                 {(listTab === 'ASSIGNED' || listTab === 'UNASSIGNED') && <button onClick={exportMembersCSV} className="text-xs bg-green-50 text-green-700 px-3 py-1 rounded border border-green-200">📥 소속원 CSV</button>}
                                 {listTab === 'LEADER' && <button onClick={deleteAllLeaders} disabled={processing} className="text-xs bg-red-600 text-white px-3 py-1 rounded hover:bg-red-700 disabled:opacity-50">🗑️ 리더 전체삭제</button>}
@@ -1201,26 +1363,46 @@
         };
 
         // 멤버에게 적합한 리더 추천 (카테고리별)
-        const findBestLeaders = (member, leaders, category, topN = 5) => {
+        const findBestLeaders = (member, leaders, category, topN = 5, weights) => {
             if (!member || !member.lat || !member.lng) return [];
 
             const candidates = leaders.filter(l => l.lat && l.lng).map(l => {
-                const dist = getDistance(member.lat, member.lng, l.lat, l.lng);
-                const ageDiff = Math.abs(calcAge(l.birthdate || '1980-01-01') - calcAge(member.birthdate || '2000-01-01'));
-                const score = dist + (ageDiff / 20);
-                return { ...l, distance: dist, ageDiff, score };
+                const fit = scoreLeaderMemberFit(l, member, weights);
+                return { ...l, ...fit };
             });
 
             return candidates.sort((a, b) => a.score - b.score).slice(0, topN);
         };
 
+        const RecommendWeightPanel = ({ weights, onChange, className = '' }) => {
+            const items = [
+                { key: 'distance', label: '거리', color: 'text-blue-600' },
+                { key: 'age', label: '나이', color: 'text-emerald-600' },
+                { key: 'gender', label: '성별', color: 'text-violet-600' },
+                { key: 'role', label: '직분', color: 'text-amber-600' }
+            ];
+            const setWeight = (key, value) => onChange({ ...weights, [key]: clamp(Number(value), 0, 100) });
+            return (
+                <div className={`bg-white border rounded-xl p-3 space-y-2 ${className}`}>
+                    <div className="text-xs font-bold text-slate-600">추천 가중치</div>
+                    {items.map(item => (
+                        <div key={item.key} className="grid grid-cols-[42px_1fr_34px] items-center gap-2 text-xs">
+                            <span className={`font-bold ${item.color}`}>{item.label}</span>
+                            <input type="range" min="0" max="100" value={weights[item.key]} onChange={e => setWeight(item.key, e.target.value)} />
+                            <span className="text-right text-slate-500">{weights[item.key]}</span>
+                        </div>
+                    ))}
+                </div>
+            );
+        };
+
         // 리더 모집 모달 (공용)
-        const RecruitmentModal = ({ leader, members, leaders, onClose, onAssign }) => {
+        const RecruitmentModal = ({ leader, members, leaders, onClose, onAssign, recommendWeights, onRecommendWeightsChange }) => {
             const [candidates, setCandidates] = useState({ unassigned: [], assigned: [] });
 
             useEffect(() => {
-                setCandidates(findRecruits(leader, members, 5)); // 5명씩 추천으로 변경
-            }, [leader, members]);
+                setCandidates(findRecruits(leader, members, 5, recommendWeights));
+            }, [leader, members, recommendWeights]);
 
             const CandidateRow = ({ m, type }) => (
                 <div className="flex justify-between items-center p-2 hover:bg-slate-50 border-b border-slate-100 last:border-0">
@@ -1232,6 +1414,9 @@
                         </div>
                         <div className="text-[10px] text-slate-400 mt-0.5">
                             {Number(m.distance).toFixed(1)}km · 나이차 {m.ageDiff}세 · {m.address}
+                        </div>
+                        <div className="text-[10px] text-slate-500 mt-0.5">
+                            {m.reason}
                         </div>
                     </div>
                     <button
@@ -1256,6 +1441,7 @@
                             </div>
                         )}
                         <div className="p-4 max-h-[70vh] overflow-y-auto">
+                            <RecommendWeightPanel weights={recommendWeights} onChange={onRecommendWeightsChange} className="mb-3" />
                             <div className="mb-6">
                                 <h3 className="text-sm font-bold text-red-600 border-b border-red-100 pb-2 mb-2 flex items-center gap-2">
                                     <span className="bg-red-100 px-2 py-0.5 rounded-full text-[10px]">1순위</span> 미배정 인원 추천
@@ -1280,7 +1466,7 @@
         }
 
         // 멤버 배정 추천 모달 (PlacementModal)
-        const PlacementModal = ({ member, leaders, getGroupOrder, onClose, onAssign }) => {
+        const PlacementModal = ({ member, leaders, getGroupOrder, onClose, onAssign, recommendWeights, onRecommendWeightsChange }) => {
             const [activeTab, setActiveTab] = useState(0); // 0: 일반, 1: 직장, 2: 관리, 3: 남성 (순서 주의: index.html의 getGroupOrder와 일치해야함)
             const [recommendations, setRecommendations] = useState([]);
 
@@ -1288,9 +1474,9 @@
                 if (!member) return;
                 // 선택된 탭(category)에 해당하는 리더 필터링
                 const filteredLeaders = leaders.filter(l => getGroupOrder(l) === activeTab);
-                const best = findBestLeaders(member, filteredLeaders, activeTab, 5);
+                const best = findBestLeaders(member, filteredLeaders, activeTab, 5, recommendWeights);
                 setRecommendations(best);
-            }, [member, leaders, activeTab, getGroupOrder]);
+            }, [member, leaders, activeTab, getGroupOrder, recommendWeights]);
 
             return (
                 <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-4" onClick={onClose}>
@@ -1320,6 +1506,7 @@
                         </div>
 
                         <div className="p-4 max-h-[60vh] overflow-y-auto bg-slate-50">
+                            <RecommendWeightPanel weights={recommendWeights} onChange={onRecommendWeightsChange} className="mb-3" />
                             {(!member.lat || !member.lng) && (
                                 <div className="bg-amber-50 border border-amber-200 px-4 py-2 text-amber-800 text-xs rounded mb-3">
                                     ⚠️ 멤버의 위치 정보가 없어 거리 기반 추천이 불완전합니다.
@@ -1344,6 +1531,9 @@
                                                 <div className="text-xs text-slate-400 mt-1">
                                                     {leader.address || '주소없음'} · {Number(leader.distance).toFixed(1)}km · 나이차 {leader.ageDiff}세
                                                 </div>
+                                                <div className="text-[10px] text-slate-500 mt-0.5">
+                                                    {leader.reason}
+                                                </div>
                                             </div>
                                             <button
                                                 onClick={() => onAssign(member, leader)}
@@ -1364,7 +1554,7 @@
 
 
 
-        const MemberMatching = ({ globalData, onRefresh, setGlobalData, setSyncing }) => {
+        const MemberMatching = ({ globalData, onRefresh, setGlobalData, setSyncing, recommendWeights, onRecommendWeightsChange }) => {
             const getStoredForm = () => { try { const s = sessionStorage.getItem('MATCH_FORM'); return s ? JSON.parse(s) : null } catch { return null } };
             const [form, setForm] = useState(() => getStoredForm() || { name: '', role: '성도', birthdate: '', gender: 'Male', address: '' }), [loading, setLoading] = useState(false), [candidates, setCandidates] = useState([]), [target, setTarget] = useState(null), [selId, setSelId] = useState(null); const mapRef = useRef(null), mapInst = useRef(null), markers = useRef([]);
             // const [showUnassigned, setShowUnassigned] = useState(false); // Removed: Always visible in footer
@@ -1447,13 +1637,13 @@
 
                         if (member.lat && member.lng) {
                             setTarget({ lat: member.lat, lng: member.lng });
-                            const res = findClosest(member.lat, member.lng, member.birthdate, leaders, 5);
+                            const res = findClosest(member.lat, member.lng, member.birthdate, leaders, 5, { member, weights: recommendWeights });
                             setCandidates(res);
                             if (!res.length) alert("리더 없음");
                         } else {
                             const geo = await geocodeAddress(member.address);
                             setTarget({ lat: geo.lat, lng: geo.lng });
-                            const res = findClosest(geo.lat, geo.lng, member.birthdate, leaders, 5);
+                            const res = findClosest(geo.lat, geo.lng, member.birthdate, leaders, 5, { member: { ...member, lat: geo.lat, lng: geo.lng }, weights: recommendWeights });
                             setCandidates(res);
                             if (!res.length) alert("리더 없음");
                         }
@@ -1462,7 +1652,7 @@
                 }
             };
 
-            const search = async e => { e?.preventDefault(); if (!form.address || !form.birthdate) { alert("주소/생년월일 필요"); return } setLoading(true); setCandidates([]); try { const geo = await geocodeAddress(form.address); setTarget({ lat: geo.lat, lng: geo.lng }); setForm(p => ({ ...p, address: geo.formattedAddress })); const res = findClosest(geo.lat, geo.lng, form.birthdate, leaders, 5); setCandidates(res); if (!res.length) alert("리더 없음") } catch (e) { alert(e.message) } finally { setLoading(false) } };
+            const search = async e => { e?.preventDefault(); if (!form.address || !form.birthdate) { alert("주소/생년월일 필요"); return } setLoading(true); setCandidates([]); try { const geo = await geocodeAddress(form.address); setTarget({ lat: geo.lat, lng: geo.lng }); setForm(p => ({ ...p, address: geo.formattedAddress })); const res = findClosest(geo.lat, geo.lng, form.birthdate, leaders, 5, { member: { ...form, lat: geo.lat, lng: geo.lng }, weights: recommendWeights }); setCandidates(res); if (!res.length) alert("리더 없음") } catch (e) { alert(e.message) } finally { setLoading(false) } };
 
 
 
@@ -1470,13 +1660,14 @@
                 if (!selId || !target) return;
                 const name = candidates.find(c => c.id === selId)?.name;
                 if (!confirm(`${form.name}→${name} 배정?`)) return;
+                const normalizedForm = normalizePersonRecord(form);
 
                 // Optimistic Update
                 const backup = { ...globalData };
                 const newMember = {
                     id: selectedMemberId || Date.now(), // Temporary ID if new
-                    name: form.name, role: form.role, birthdate: form.birthdate,
-                    gender: form.gender, address: form.address,
+                    name: normalizedForm.name, role: normalizedForm.role, birthdate: normalizedForm.birthdate,
+                    gender: normalizedForm.gender, address: normalizedForm.address,
                     lat: target.lat, lng: target.lng, leader_id: selId
                 };
 
@@ -1515,6 +1706,7 @@
             const assignUnassigned = async () => {
                 if (!form.name || !form.birthdate) { alert("이름/생년월일 필요"); return; }
                 if (!confirm(`${form.name}님을 미배정으로 등록하시겠습니까?`)) return;
+                const normalizedForm = normalizePersonRecord(form);
 
                 // Optimistic Logic
                 const backup = { ...globalData };
@@ -1529,8 +1721,8 @@
 
                 const newMember = {
                     id: selectedMemberId || Date.now(),
-                    name: form.name, role: form.role, birthdate: form.birthdate,
-                    gender: form.gender, address: form.address,
+                    name: normalizedForm.name, role: normalizedForm.role, birthdate: normalizedForm.birthdate,
+                    gender: normalizedForm.gender, address: normalizedForm.address,
                     lat: lat || 0, lng: lng || 0, leader_id: ''
                 };
 
@@ -1546,9 +1738,9 @@
                 setSyncing?.(true);
 
                 try {
-                    if (!lat && form.address) {
+                    if (!lat && normalizedForm.address) {
                         try {
-                            const geo = await geocodeAddress(form.address);
+                            const geo = await geocodeAddress(normalizedForm.address);
                             lat = geo.lat; lng = geo.lng;
                             newMember.lat = lat; newMember.lng = lng; // Refine for accurate insert
                         } catch (e) { console.warn("주소 변환 실패:", e); }
@@ -1556,8 +1748,8 @@
 
                     if (selectedMemberId) {
                         await updateMember(selectedMemberId, {
-                            name: form.name, role: form.role, birthdate: form.birthdate,
-                            gender: form.gender, address: form.address,
+                            name: normalizedForm.name, role: normalizedForm.role, birthdate: normalizedForm.birthdate,
+                            gender: normalizedForm.gender, address: normalizedForm.address,
                             lat: lat, lng: lng, leader_id: ''
                         });
                     } else {
@@ -1576,15 +1768,16 @@
                 }
             };
 
-            const ic = "block w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm";
+            const ic = "block w-full rounded-lg border bg-slate-50 py-3 px-3 text-base sm:text-sm";
             const selectLeader = (leader) => { setSelId(leader.id); if (mapInst.current && window.google) { mapInst.current.panTo({ lat: leader.lat, lng: leader.lng }); mapInst.current.setZoom(14); } };
             return (<div className="pb-12"><div className="grid grid-cols-1 xl:grid-cols-12 gap-6 min-h-[600px]"><div className="xl:col-span-5 space-y-6"><div className="bg-white rounded-2xl border"><div className="px-6 py-4 border-b bg-slate-50 flex justify-between items-center"><b>① 정보 입력</b></div>
-                <form onSubmit={search} className="p-6 space-y-4"><div className="grid grid-cols-2 gap-4"><div><label className="text-xs font-bold text-slate-500">이름</label><input required value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className={ic} /></div><div><label className="text-xs font-bold text-slate-500">직분</label><input value={form.role} onChange={e => setForm({ ...form, role: e.target.value })} className={ic} /></div></div><div className="grid grid-cols-2 gap-4"><div><label className="text-xs font-bold text-slate-500">생년월일</label><input type="date" required value={form.birthdate} onChange={e => setForm({ ...form, birthdate: e.target.value })} className={ic} /></div><div><label className="text-xs font-bold text-slate-500">성별</label><select value={form.gender} onChange={e => setForm({ ...form, gender: e.target.value })} className={ic}><option value="Male">남성</option><option value="Female">여성</option></select></div></div><div><label className="text-xs font-bold text-slate-500">주소</label><input required value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} className={ic} /></div>
+                <form onSubmit={search} className="p-6 space-y-4"><div className="grid grid-cols-2 gap-4"><div><label className="text-xs font-bold text-slate-500">이름</label><input required value={form.name} onChange={e => setForm({ ...form, name: normalizeName(e.target.value) })} className={ic} inputMode="text" autoComplete="name" /></div><div><label className="text-xs font-bold text-slate-500">직분</label><input value={form.role} onChange={e => setForm({ ...form, role: e.target.value })} className={ic} inputMode="text" /></div></div><div className="grid grid-cols-2 gap-4"><div><label className="text-xs font-bold text-slate-500">생년월일</label><input type="date" required value={form.birthdate} onChange={e => setForm({ ...form, birthdate: e.target.value })} className={ic} /></div><div><label className="text-xs font-bold text-slate-500">성별</label><select value={form.gender} onChange={e => setForm({ ...form, gender: e.target.value })} className={ic}><option value="Male">남성</option><option value="Female">여성</option></select></div></div><div><label className="text-xs font-bold text-slate-500">주소</label><input required value={form.address} onChange={e => setForm({ ...form, address: normalizeAddressText(e.target.value) })} className={ic} inputMode="text" autoComplete="street-address" /></div>
+                    <RecommendWeightPanel weights={recommendWeights} onChange={onRecommendWeightsChange} />
                     <div className="flex gap-2">
                         <button disabled={loading} className="flex-1 bg-brand-600 text-white font-bold py-3 rounded-xl">{loading ? '검색중...' : '🔍 리더 찾기'}</button>
                         <button type="button" onClick={assignUnassigned} disabled={loading} className="w-24 bg-slate-100 text-slate-600 font-bold py-3 rounded-xl hover:bg-slate-200">미배정 저장</button>
                     </div>
-                </form></div>{candidates.length > 0 && <div className="bg-white rounded-2xl border animate-fade-in-up"><div className="px-6 py-4 border-b bg-slate-50 flex justify-between items-center"><b>② 추천 결과</b><span className="text-xs text-slate-400">상위 5순위</span></div><div className="p-4 space-y-3 max-h-[400px] overflow-y-auto">{candidates.map((l, i) => <div key={l.id} onClick={() => selectLeader(l)} className={`p-4 rounded-xl border cursor-pointer ${selId === l.id ? 'border-brand-500 bg-brand-50 ring-1 ring-brand-500' : 'border-slate-200 hover:border-brand-300'}`}><div className="flex justify-between"><div><div className="flex items-center gap-2"><span className="w-5 h-5 rounded-full bg-brand-100 text-brand-600 text-xs font-bold flex items-center justify-center">{i + 1}</span><b>{l.name}</b><span className="text-xs text-slate-500">{l.role} · {calcAge(l.birthdate)}세</span></div><div className="text-xs text-slate-500 mt-1 ml-7">{l.address}</div><div className="flex gap-2 mt-2 text-xs ml-7"><span className={`px-2 py-1 rounded ${l.current_members >= l.max_capacity ? 'bg-red-50 text-red-600' : 'bg-slate-100'}`}>{l.current_members}/{l.max_capacity}명</span><span className="px-2 py-1 rounded bg-slate-100">나이차 {l.ageDiff}살</span></div></div><div className="text-right"><span className="text-xl font-black text-brand-600">{l.distance.toFixed(1)}<span className="text-xs text-slate-400">km</span></span>{selId === l.id && <div className="text-brand-600 mt-1">✓</div>}</div></div></div>)}</div><div className="p-4 border-t bg-slate-50"><button onClick={assign} disabled={!selId || loading} className="w-full bg-green-600 text-white font-bold py-3 rounded-xl disabled:bg-slate-300">✓ 배정</button></div></div>}</div>
+                </form></div>{candidates.length > 0 && <div className="bg-white rounded-2xl border animate-fade-in-up"><div className="px-6 py-4 border-b bg-slate-50 flex justify-between items-center"><b>② 추천 결과</b><span className="text-xs text-slate-400">상위 5순위</span></div><div className="p-4 space-y-3 max-h-[400px] overflow-y-auto">{candidates.map((l, i) => <div key={l.id} onClick={() => selectLeader(l)} className={`p-4 rounded-xl border cursor-pointer ${selId === l.id ? 'border-brand-500 bg-brand-50 ring-1 ring-brand-500' : 'border-slate-200 hover:border-brand-300'}`}><div className="flex justify-between"><div><div className="flex items-center gap-2"><span className="w-5 h-5 rounded-full bg-brand-100 text-brand-600 text-xs font-bold flex items-center justify-center">{i + 1}</span><b>{l.name}</b><span className="text-xs text-slate-500">{l.role} · {calcAge(l.birthdate)}세</span></div><div className="text-xs text-slate-500 mt-1 ml-7">{l.address}</div><div className="flex gap-2 mt-2 text-xs ml-7"><span className={`px-2 py-1 rounded ${l.current_members >= l.max_capacity ? 'bg-red-50 text-red-600' : 'bg-slate-100'}`}>{l.current_members}/{l.max_capacity}명</span><span className="px-2 py-1 rounded bg-slate-100">나이차 {l.ageDiff}살</span></div><div className="text-[11px] text-slate-500 mt-1 ml-7">{l.reason}</div></div><div className="text-right"><span className="text-xl font-black text-brand-600">{l.distance.toFixed(1)}<span className="text-xs text-slate-400">km</span></span>{selId === l.id && <div className="text-brand-600 mt-1">✓</div>}</div></div></div>)}</div><div className="p-4 border-t bg-slate-50"><button onClick={assign} disabled={!selId || loading} className="w-full bg-green-600 text-white font-bold py-3 rounded-xl disabled:bg-slate-300">✓ 배정</button></div></div>}</div>
 
                 <div className="xl:col-span-7 space-y-6">
                     {/* Map Card */}
@@ -1985,7 +2178,7 @@
                                 if (leader) selectLeaderOnMap(leader);
                             } else {
                                 // 미배정: 추천 리더 표시
-                                const recommended = findClosest(m.lat, m.lng, m.birthdate, leaders, 5);
+                                const recommended = findClosest(m.lat, m.lng, m.birthdate, leaders, 5, { member: m });
                                 polylines.current.forEach(p => p.setMap(null)); polylines.current = [];
                                 markers.current.forEach(mk => { if (mk.originalIcon) mk.setIcon(mk.originalIcon); mk.setZIndex(mk.leaderData ? 100 : 50); });
 
@@ -2297,7 +2490,7 @@
             );
         };
 
-        const OrgChart = ({ globalData, onRefresh, setGlobalData, setSyncing }) => {
+        const OrgChart = ({ globalData, onRefresh, setGlobalData, setSyncing, recommendWeights, onRecommendWeightsChange }) => {
             const { leaders, members } = globalData;
 
             // 다중 선택 상태 (터치/클릭 기반) - { id, fromLeaderId, member }
@@ -2451,7 +2644,7 @@
 
                     // 추천 리더 계산 (마지막 선택된 멤버 기준)
                     if (member.lat && member.lng) {
-                        const recommended = findClosest(member.lat, member.lng, member.birthdate, leaders, 3);
+                        const recommended = findClosest(member.lat, member.lng, member.birthdate, leaders, 3, { member, weights: recommendWeights });
                         setRecommendedLeaders(recommended.map(r => r.id));
                     } else {
                         setRecommendedLeaders([]);
@@ -2615,9 +2808,10 @@
             const handleSaveEdit = async (e) => {
                 e.preventDefault();
                 if (!editModal.member) return;
+                const normalizedEdit = normalizePersonRecord(editForm);
 
                 const backup = { ...globalData };
-                const updatedMember = { ...editModal.member, ...editForm };
+                const updatedMember = { ...editModal.member, ...normalizedEdit };
 
                 const newMembers = members.map(m => m.id === updatedMember.id ? updatedMember : m);
                 setGlobalData({ ...globalData, members: newMembers });
@@ -2625,7 +2819,7 @@
                 setSyncing?.(true);
 
                 try {
-                    await updateMember(updatedMember.id, editForm);
+                    await updateMember(updatedMember.id, normalizedEdit);
                 } catch (err) {
                     alert("수정 실패: " + err.message);
                     setGlobalData(backup);
@@ -2769,18 +2963,19 @@
                 }
                 setAddingSaving(true);
                 try {
-                    const geo = await geocodeAddress(addMemberForm.address);
+                    const normalized = normalizePersonRecord(addMemberForm);
+                    const geo = await geocodeAddress(normalized.address);
                     const newMember = {
-                        ...addMemberForm,
-                        gender: normalizeGender(addMemberForm.gender),
-                        contact: formatPhone(addMemberForm.contact),
+                        ...normalized,
+                        gender: normalizeGender(normalized.gender),
+                        contact: normalizePhone(normalized.contact),
                         lat: geo.lat,
                         lng: geo.lng,
                         leader_id: addMemberModal.leaderId || '',
                         status: addMemberModal.leaderId ? 'assigned' : 'wants_group'
                     };
                     await insertMember(newMember);
-                    alert(`${addMemberForm.name}님이 ${addMemberModal.leaderName || '미배정'}에 등록되었습니다!`);
+                    alert(`${normalized.name}님이 ${addMemberModal.leaderName || '미배정'}에 등록되었습니다!`);
                     setAddMemberModal({ visible: false, leaderId: null, leaderName: '' });
                     onRefresh?.();
                 } catch (err) {
@@ -3133,20 +3328,20 @@
                                 <form onSubmit={handleAddMemberSubmit} className="space-y-4">
                                     <div>
                                         <label className="text-xs font-bold text-slate-500 block mb-1">이름 *</label>
-                                        <input required value={addMemberForm.name} onChange={e => setAddMemberForm({ ...addMemberForm, name: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" placeholder="홍길동" />
+                                        <input required value={addMemberForm.name} onChange={e => setAddMemberForm({ ...addMemberForm, name: normalizeName(e.target.value) })} className="w-full rounded-lg border bg-slate-50 py-3 px-3 text-base sm:text-sm" placeholder="홍길동" inputMode="text" autoComplete="name" />
                                     </div>
                                     <div>
                                         <label className="text-xs font-bold text-slate-500 block mb-1">주소 *</label>
-                                        <input required value={addMemberForm.address} onChange={e => setAddMemberForm({ ...addMemberForm, address: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" placeholder="서울시 강남구..." />
+                                        <input required value={addMemberForm.address} onChange={e => setAddMemberForm({ ...addMemberForm, address: normalizeAddressText(e.target.value) })} className="w-full rounded-lg border bg-slate-50 py-3 px-3 text-base sm:text-sm" placeholder="서울시 강남구..." inputMode="text" autoComplete="street-address" />
                                     </div>
                                     <div className="grid grid-cols-2 gap-4">
                                         <div>
                                             <label className="text-xs font-bold text-slate-500 block mb-1">직분</label>
-                                            <input value={addMemberForm.role} onChange={e => setAddMemberForm({ ...addMemberForm, role: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" placeholder="성도" />
+                                            <input value={addMemberForm.role} onChange={e => setAddMemberForm({ ...addMemberForm, role: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-3 px-3 text-base sm:text-sm" placeholder="성도" inputMode="text" />
                                         </div>
                                         <div>
                                             <label className="text-xs font-bold text-slate-500 block mb-1">성별</label>
-                                            <select value={addMemberForm.gender} onChange={e => setAddMemberForm({ ...addMemberForm, gender: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm">
+                                            <select value={addMemberForm.gender} onChange={e => setAddMemberForm({ ...addMemberForm, gender: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-3 px-3 text-base sm:text-sm">
                                                 <option value="Male">남성</option>
                                                 <option value="Female">여성</option>
                                             </select>
@@ -3155,11 +3350,11 @@
                                     <div className="grid grid-cols-2 gap-4">
                                         <div>
                                             <label className="text-xs font-bold text-slate-500 block mb-1">생년월일</label>
-                                            <input type="date" value={addMemberForm.birthdate} onChange={e => setAddMemberForm({ ...addMemberForm, birthdate: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" />
+                                            <input type="date" value={addMemberForm.birthdate} onChange={e => setAddMemberForm({ ...addMemberForm, birthdate: e.target.value })} className="w-full rounded-lg border bg-slate-50 py-3 px-3 text-base sm:text-sm" />
                                         </div>
                                         <div>
                                             <label className="text-xs font-bold text-slate-500 block mb-1">연락처</label>
-                                            <input value={addMemberForm.contact} onChange={e => setAddMemberForm({ ...addMemberForm, contact: formatPhone(e.target.value) })} className="w-full rounded-lg border bg-slate-50 py-2.5 px-3 text-sm" placeholder="010-0000-0000" />
+                                            <input value={addMemberForm.contact} onChange={e => setAddMemberForm({ ...addMemberForm, contact: formatPhone(e.target.value) })} className="w-full rounded-lg border bg-slate-50 py-3 px-3 text-base sm:text-sm" placeholder="010-0000-0000" inputMode="numeric" autoComplete="tel" />
                                         </div>
                                     </div>
                                     <div className="flex justify-end gap-2 mt-6">
@@ -3178,6 +3373,8 @@
                             leader={recruitmentModal.leader}
                             members={members}
                             leaders={leaders}
+                            recommendWeights={recommendWeights}
+                            onRecommendWeightsChange={onRecommendWeightsChange}
                             onClose={() => setRecruitmentModal({ visible: false, leader: null })}
                             onAssign={handleRecruitMember}
                         />
@@ -3188,6 +3385,8 @@
                             member={placementModal.member}
                             leaders={leaders}
                             getGroupOrder={getGroupOrder}
+                            recommendWeights={recommendWeights}
+                            onRecommendWeightsChange={onRecommendWeightsChange}
                             onClose={() => setPlacementModal({ visible: false, member: null })}
                             onAssign={handlePlaceMember}
                         />
@@ -3201,8 +3400,13 @@
             const [globalData, setGlobalData] = useState({ leaders: [], members: [], loaded: false, loading: false });
             // 백그라운드 동기화 상태
             const [syncing, setSyncing] = useState(false);
+            const [recommendWeights, setRecommendWeights] = useState(getStoredRecommendWeights());
             // 로딩 진행 상태
             const [loadingProgress, setLoadingProgress] = useState({ step: '', progress: 0, details: '' });
+            const handleRecommendWeightsChange = (next) => {
+                setRecommendWeights(next);
+                saveRecommendWeights(next);
+            };
 
             // 동기화 중일 때 페이지 이탈 경고
             useEffect(() => {
@@ -3391,10 +3595,10 @@
                             </div>
                         ) : (
                             <div className="animate-fade-in-up">
-                                {tab === 'MATCH' && <MemberMatching globalData={globalData} onRefresh={refreshGlobalData} setGlobalData={setGlobalData} setSyncing={setSyncing} />}
+                                {tab === 'MATCH' && <MemberMatching globalData={globalData} onRefresh={refreshGlobalData} setGlobalData={setGlobalData} setSyncing={setSyncing} recommendWeights={recommendWeights} onRecommendWeightsChange={handleRecommendWeightsChange} />}
                                 {tab === 'UPLOAD' && <LeaderUpload globalData={globalData} onRefresh={refreshGlobalData} />}
                                 {tab === 'DASHBOARD' && <Dashboard globalData={globalData} onRefresh={refreshGlobalData} setGlobalData={setGlobalData} />}
-                                {tab === 'ORG_CHART' && <OrgChart globalData={globalData} onRefresh={refreshGlobalData} setGlobalData={setGlobalData} setSyncing={setSyncing} />}
+                                {tab === 'ORG_CHART' && <OrgChart globalData={globalData} onRefresh={refreshGlobalData} setGlobalData={setGlobalData} setSyncing={setSyncing} recommendWeights={recommendWeights} onRecommendWeightsChange={handleRecommendWeightsChange} />}
                             </div>
                         )}
                     </main>
